@@ -6,8 +6,8 @@ import pandas as pd
 NY_TZ = ZoneInfo("America/New_York")
 UTC_TZ = ZoneInfo("UTC")
 
-DECISION_OFFSET_MINUTES = 25
-MOC_CUTOFF_OFFSET_MINUTES = 12
+DECISION_OFFSET_MINUTES = 15
+MOC_CUTOFF_OFFSET_MINUTES = 2
 
 
 def get_ny_now() -> datetime:

@@ -19,8 +19,9 @@ python manage.py setup_botops_schedules
 
 # 4. Iniciar Celery Worker y Celery Beat en segundo plano
 echo "[4/5] Iniciando Celery Worker y Celery Beat..."
-celery -A config worker -l info --concurrency=2 &
+celery -A config worker -l info -Q celery,marketdata,signals,execution,accounting --concurrency=2 &
 celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler &
+
 
 # 5. Iniciar Servidor Gunicorn
 echo "[5/5] Iniciando servidor Gunicorn en puerto ${PORT:-8000}..."

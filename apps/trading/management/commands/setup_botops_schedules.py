@@ -12,48 +12,64 @@ class Command(BaseCommand):
         # Timezone: America/New_York
         tz = "America/New_York"
 
+        # Clean up legacy tasks if present
+        PeriodicTask.objects.filter(name__startswith="[1/5]").delete()
+        PeriodicTask.objects.filter(name__startswith="[2/5]").delete()
+        PeriodicTask.objects.filter(name__startswith="[3/5]").delete()
+        PeriodicTask.objects.filter(name__startswith="[4/5]").delete()
+        PeriodicTask.objects.filter(name__startswith="[5/5]").delete()
+
         schedules_def = [
             {
-                "name": "[1/5] Market Data Sync & Quotes",
-                "task": "marketdata_refresh",
-                "minute": "30",
+                "name": "[1/6] Daily Algorithmic Trading Pipeline",
+                "task": "run_daily_trading_pipeline",
+                "minute": "50",
                 "hour": "15",
                 "day_of_week": "1-5",  # Mon-Fri
-                "description": "Descarga barras OHLCV y cotizaciones más recientes de activos operables (15:30 NY).",
+                "description": "Pipeline consecutivo: descarga market data, genera señales, rebalancea carteras y despacha órdenes MOC/Market (15:50 NY).",
             },
             {
-                "name": "[2/5] Compute Macro Regimes & Quantitative Signals",
+                "name": "[2/6] Fallback: Compute Quantitative Signals",
                 "task": "compute_regimes_and_signals",
-                "minute": "35",
+                "minute": "52",
                 "hour": "15",
                 "day_of_week": "1-5",  # Mon-Fri
-                "description": "Calcula regímenes e indicadores cuantitativos 25m antes del cierre (15:35 NY).",
+                "description": "Respaldo automático a las 15:52 NY en caso de retraso o fallo en la descarga previa.",
             },
             {
-                "name": "[3/5] Portfolio Rebalance & Allocation Orchestration",
+                "name": "[3/6] Fallback: Portfolio Rebalance & Allocation Orchestration",
                 "task": "orchestrate_portfolio_runs",
-                "minute": "36",
+                "minute": "53",
                 "hour": "15",
                 "day_of_week": "1-5",  # Mon-Fri
-                "description": "Evalúa tolerancias de carteras, calcula pesos y genera órdenes target (15:36 NY).",
+                "description": "Respaldo automático a las 15:53 NY: genera rebalanceos para cualquier cartera pendiente hoy.",
             },
             {
-                "name": "[4/5] Order Dispatch (Alpaca MOC Cutoff & Simulation)",
+                "name": "[4/6] Fallback: Order Dispatch (Alpaca & Simulated)",
                 "task": "dispatch_moc_and_manual_orders",
-                "minute": "48",
+                "minute": "55",
                 "hour": "15",
                 "day_of_week": "1-5",  # Mon-Fri
-                "description": "Despacha órdenes MOC a Alpaca y genera fills en simulador (15:48 NY).",
+                "description": "Respaldo final de despacho a las 15:55 NY antes del cierre de mercado para cualquier orden pendiente.",
             },
             {
-                "name": "[5/5] Post-Market Daily Equity & Position Snapshot",
+                "name": "[5/6] Post-Close Broker Fills & Trade Reconciliation",
+                "task": "reconcile_broker_fills",
+                "minute": "05",
+                "hour": "16",
+                "day_of_week": "1-5",  # Mon-Fri
+                "description": "Consulta a Alpaca tras el cierre (16:05 NY) los fills, precios de ejecución reales y actualiza posiciones contables.",
+            },
+            {
+                "name": "[6/6] Post-Market Daily Equity & Position Snapshot",
                 "task": "accounting_daily_snapshot",
                 "minute": "15",
                 "hour": "16",
                 "day_of_week": "1-5",  # Mon-Fri
-                "description": "Genera snapshot contable del AUM total y posiciones cerradas (16:15 NY).",
+                "description": "Snapshot contable oficial de cierre del AUM total, cash y posiciones (16:15 NY).",
             },
         ]
+
 
         for s in schedules_def:
             crontab, _ = CrontabSchedule.objects.get_or_create(

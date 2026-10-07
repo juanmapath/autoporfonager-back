@@ -72,15 +72,21 @@ class OrderDispatcher:
                 from alpaca.trading.client import TradingClient
                 from alpaca.trading.requests import MarketOrderRequest
                 from alpaca.trading.enums import OrderSide, TimeInForce
+                from datetime import time as dt_time
+
+                # Alpaca cutoff for MOC (TimeInForce.CLS) is 15:50 ET.
+                # If dispatching at or after 15:50 ET, submit continuous auction market order (TimeInForce.DAY).
+                tif = TimeInForce.CLS if now_ny.time() < dt_time(15, 50) else TimeInForce.DAY
 
                 client = TradingClient(api_key, api_secret, paper=is_paper)
                 req = MarketOrderRequest(
                     symbol=intent.instrument.symbol,
                     qty=float(qty),
                     side=OrderSide.BUY if side == "buy" else OrderSide.SELL,
-                    time_in_force=TimeInForce.CLS,
+                    time_in_force=tif,
                     client_order_id=intent.idempotency_key,
                 )
+
                 alpaca_res = client.submit_order(order_data=req)
                 order.broker_order_id = str(alpaca_res.id)
                 order.status = "accepted"
