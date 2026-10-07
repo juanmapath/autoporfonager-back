@@ -17,10 +17,16 @@ python manage.py collectstatic --no-input
 echo "[3/5] Configurando tareas y schedules automatizados de trading..."
 python manage.py setup_botops_schedules
 
+export DJANGO_SETTINGS_MODULE=${DJANGO_SETTINGS_MODULE:-config.settings.prod}
+
+# Limpiar posibles locks o pidfiles antiguos de Celery Beat
+rm -f /tmp/celerybeat.pid /tmp/celerybeat-schedule* celerybeat.pid celerybeat-schedule*
+
 # 4. Iniciar Celery Worker y Celery Beat en segundo plano
 echo "[4/5] Iniciando Celery Worker y Celery Beat..."
 celery -A config worker -l info -Q celery,marketdata,signals,execution,accounting --concurrency=2 &
-celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler &
+celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler --pidfile=/tmp/celerybeat.pid -s /tmp/celerybeat-schedule &
+
 
 
 # 5. Iniciar Servidor Gunicorn
