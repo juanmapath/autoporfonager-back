@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 from decimal import Decimal
 import pandas as pd
 from django.utils import timezone as dj_timezone

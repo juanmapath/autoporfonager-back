@@ -8,7 +8,8 @@ from apps.trading.models import RebalanceRun, Target, OrderIntent
 from apps.accounting.models import LogicalPosition
 from apps.marketdata.models import LatestQuote
 from apps.strategies.models import Signal
-from core.money import quantize_qty, round_down
+from core.money import quantize_qty
+
 
 
 class PortfolioAllocator:
