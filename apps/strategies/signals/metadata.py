@@ -1,0 +1,323 @@
+"""
+Catalog and metadata schemas for Bot types and Strategies.
+This provides the declarative definitions for frontends, Django Admin, and validation:
+- Bot Types (Execution wrappers from bot_catalog.py)
+- Quantitative Strategy Algorithms (from strategies_catalog.py)
+"""
+
+BOT_CATALOG = {
+    "one_strategy": {
+        "id": "one_strategy",
+        "name": "One Strategy Bot",
+        "category": "Single Asset",
+        "description": "Opera un único activo basándose en una sola estrategia del catálogo (ej. Bollinger Bands en TQQQ).",
+        "engine": "single_signal",
+        "min_strategies": 1,
+        "max_strategies": 1,
+        "requires_traded_asset": True,
+        "requires_signal_asset": False,
+        "signal_only": False,
+        "default_timeframe": "1d",
+    },
+    "multi_strategy": {
+        "id": "multi_strategy",
+        "name": "Multi Strategy Bot",
+        "category": "Multi Signal",
+        "description": "Combina múltiples estrategias sobre un mismo activo. Suma y escala la posición si varias estrategias coinciden.",
+        "engine": "multi_signal",
+        "min_strategies": 2,
+        "max_strategies": 10,
+        "requires_traded_asset": True,
+        "requires_signal_asset": False,
+        "signal_only": False,
+        "default_timeframe": "1d",
+    },
+    "cross_asset": {
+        "id": "cross_asset",
+        "name": "Cross Asset Bot",
+        "category": "Intermarket",
+        "description": "Evalúa señales en un activo de referencia (ej. TLT, QQQ, ^VIX) y ejecuta órdenes en otro activo (ej. TQQQ, SPY).",
+        "engine": "cross_asset",
+        "min_strategies": 1,
+        "max_strategies": 1,
+        "requires_traded_asset": True,
+        "requires_signal_asset": True,
+        "signal_only": False,
+        "default_timeframe": "1d",
+    },
+    "follow_price": {
+        "id": "follow_price",
+        "name": "Follow Price Bot",
+        "category": "Passive / Tracking",
+        "description": "Monitorea precio y posición continua en cartera para mantener exposición pasiva o de largo plazo.",
+        "engine": "follow_price",
+        "min_strategies": 0,
+        "max_strategies": 0,
+        "requires_traded_asset": True,
+        "requires_signal_asset": False,
+        "signal_only": False,
+        "default_timeframe": "1d",
+    },
+    "signal_dollar": {
+        "id": "signal_dollar",
+        "name": "Signal Dollar Bot (Macro)",
+        "category": "Macro Alerts",
+        "description": "Monitorea la TRM USD/COP vía Bollinger Bands y Z-Score emitiendo señales 'BUY DOLLARS' de alerta.",
+        "engine": "single_signal",
+        "min_strategies": 0,
+        "max_strategies": 0,
+        "requires_traded_asset": False,
+        "requires_signal_asset": False,
+        "signal_only": True,
+        "default_timeframe": "1d",
+    },
+    "signal_options": {
+        "id": "signal_options",
+        "name": "Signal Options Bot (Macro)",
+        "category": "Macro Alerts",
+        "description": "Monitorea ^VIX, HYG, LQD y DXY para clasificar el régimen de mercado (RiskOn/HighVol) y sugerir tamaño de opciones.",
+        "engine": "single_signal",
+        "min_strategies": 0,
+        "max_strategies": 0,
+        "requires_traded_asset": False,
+        "requires_signal_asset": False,
+        "signal_only": True,
+        "default_timeframe": "1d",
+    },
+}
+
+STRATEGIES_CATALOG = {
+    "MeanRev_BollingerBands": {
+        "name": "Bollinger Bands Mean Reversion",
+        "category": "Mean Reversion",
+        "description": "Entra en largo cuando el precio rompe la banda inferior y sale cuando supera el máximo de la vela previa.",
+        "parameters": [
+            {"name": "ma", "label": "Período Media Móvil", "type": "int", "default": 20, "min": 5, "max": 200},
+            {"name": "mult", "label": "Multiplicador Std Dev", "type": "float", "default": 2.0, "min": 0.5, "max": 5.0},
+        ],
+    },
+    "MeanRev_MFI": {
+        "name": "Money Flow Index (MFI) Reversion",
+        "category": "Mean Reversion",
+        "description": "Entrada por sobreventa extrema en el flujo de dinero (MFI) y salida fija tras N días.",
+        "parameters": [
+            {"name": "mfi_periods", "label": "Períodos MFI", "type": "int", "default": 14, "min": 2, "max": 100},
+            {"name": "in_mfi", "label": "Nivel de Entrada MFI", "type": "float", "default": 20.0, "min": 1.0, "max": 50.0},
+            {"name": "days_in", "label": "Días Máximos en Posición", "type": "int", "default": 5, "min": 1, "max": 60},
+        ],
+    },
+    "MeanRev_LowestLow": {
+        "name": "Lowest Low Channel Reversion",
+        "category": "Mean Reversion",
+        "description": "Compra cuando el precio toca o rompe el mínimo más bajo de los últimos N días.",
+        "parameters": [
+            {"name": "period", "label": "Período Lowest Low", "type": "int", "default": 10, "min": 2, "max": 100},
+            {"name": "days_in", "label": "Días en Posición", "type": "int", "default": 3, "min": 1, "max": 30},
+        ],
+    },
+    "MeanRev_WeakRSI": {
+        "name": "RSI Extreme Weakness",
+        "category": "Mean Reversion",
+        "description": "Compra debilidad profunda de RSI a corto plazo buscando un rebote explosivo.",
+        "parameters": [
+            {"name": "rsi_period", "label": "Período RSI", "type": "int", "default": 2, "min": 2, "max": 50},
+            {"name": "rsi_limit", "label": "Límite de Entrada RSI", "type": "float", "default": 10.0, "min": 1.0, "max": 50.0},
+            {"name": "exit_days", "label": "Días de Salida", "type": "int", "default": 3, "min": 1, "max": 30},
+        ],
+    },
+    "MeanRev_PullBackRSI": {
+        "name": "Trend Pullback RSI",
+        "category": "Mean Reversion",
+        "description": "Opera retrocesos de RSI únicamente a favor de una tendencia alcista macro con salida por RSI o Supertrend.",
+        "parameters": [
+            {"name": "rsi_window", "label": "Período RSI", "type": "int", "default": 2, "min": 2, "max": 50},
+            {"name": "out_rsi", "label": "Salida RSI", "type": "float", "default": 70.0, "min": 50.0, "max": 95.0},
+            {"name": "in_rsi", "label": "Entrada RSI", "type": "float", "default": 25.0, "min": 5.0, "max": 50.0},
+            {"name": "ma_slow", "label": "Media Lenta", "type": "int", "default": 200, "min": 20, "max": 300},
+            {"name": "ma_fast", "label": "Media Rápida", "type": "int", "default": 50, "min": 5, "max": 100},
+        ],
+    },
+    "MeanRev_BuyWeakness": {
+        "name": "Buy Weakness (MACD + Multi-Indicator)",
+        "category": "Mean Reversion",
+        "description": "Entrada por debilidad extrema combinando DEMA5/EMA50/100/200, pendiente MACD, Supertrend, RSI y Williams %R.",
+        "parameters": [
+            {"name": "fast", "label": "Período Rápido MACD", "type": "int", "default": 12, "min": 2, "max": 50},
+            {"name": "slow", "label": "Período Lento MACD", "type": "int", "default": 26, "min": 10, "max": 100},
+            {"name": "signal", "label": "Período Señal MACD", "type": "int", "default": 9, "min": 2, "max": 50},
+            {"name": "weak_in", "label": "Umbral Debilidad Score", "type": "float", "default": -4.0, "min": -10.0, "max": 0.0},
+            {"name": "wr", "label": "Período Williams %R", "type": "int", "default": 14, "min": 2, "max": 100},
+        ],
+    },
+    "MeanRev_BuyWeaknessX": {
+        "name": "Buy Weakness X (MACD + RSI Score)",
+        "category": "Mean Reversion",
+        "description": "Versión optimizada de Buy Weakness con scoring de RSI escalonado (±2) y filtro tendencial DEMA/Supertrend.",
+        "parameters": [
+            {"name": "fast", "label": "Período Rápido MACD", "type": "int", "default": 12, "min": 2, "max": 50},
+            {"name": "slow", "label": "Período Lento MACD", "type": "int", "default": 26, "min": 10, "max": 100},
+            {"name": "signal", "label": "Período Señal MACD", "type": "int", "default": 9, "min": 2, "max": 50},
+            {"name": "weak_in", "label": "Umbral Debilidad Score", "type": "float", "default": -3.0, "min": -10.0, "max": 0.0},
+        ],
+    },
+    "CrossAssets_BondsRallying": {
+        "name": "Bonds Rallying (Cross Asset)",
+        "category": "Cross Asset",
+        "description": "Detecta aceleraciones y flujos hacia bonos soberanos para posicionarse en activos de riesgo correlacionados.",
+        "parameters": [
+            {"name": "lookback", "label": "Lookback Bonos", "type": "int", "default": 20, "min": 5, "max": 100},
+            {"name": "threshold", "label": "Umbral Rally (%)", "type": "float", "default": 1.5, "min": 0.1, "max": 10.0},
+        ],
+    },
+    "Momentum_MACDHist": {
+        "name": "MACD Histogram Momentum",
+        "category": "Momentum",
+        "description": "Entrada por expansión del histograma MACD confirmando momentum acelerado.",
+        "parameters": [
+            {"name": "fast", "label": "Período Rápido", "type": "int", "default": 12, "min": 2, "max": 50},
+            {"name": "slow", "label": "Período Lento", "type": "int", "default": 26, "min": 10, "max": 100},
+            {"name": "signal", "label": "Período Señal", "type": "int", "default": 9, "min": 2, "max": 50},
+        ],
+    },
+    "MeanRev_RegresRSIL": {
+        "name": "Linear Regression + RSI Long",
+        "category": "Mean Reversion",
+        "description": "Reversión a la media combinando pendiente de regresión lineal y divergencia en RSI.",
+        "parameters": [
+            {"name": "reg_period", "label": "Período Regresión", "type": "int", "default": 20, "min": 5, "max": 100},
+            {"name": "rsi_period", "label": "Período RSI", "type": "int", "default": 14, "min": 2, "max": 50},
+        ],
+    },
+    "MeanRev_RegresRSIS": {
+        "name": "Linear Regression + RSI Short",
+        "category": "Mean Reversion",
+        "description": "Reversión a la media en corto cuando la pendiente es negativa y RSI muestra sobrecompra.",
+        "parameters": [
+            {"name": "reg_period", "label": "Período Regresión", "type": "int", "default": 20, "min": 5, "max": 100},
+            {"name": "rsi_period", "label": "Período RSI", "type": "int", "default": 14, "min": 2, "max": 50},
+        ],
+    },
+    "TrendFollowing_KVOBull": {
+        "name": "Klinger Volume Oscillator Bull",
+        "category": "Trend Following",
+        "description": "Filtra tendencias alcistas comprobando flujos de acumulación de volumen institucional.",
+        "parameters": [
+            {"name": "short_period", "label": "Período Corto", "type": "int", "default": 34, "min": 5, "max": 100},
+            {"name": "long_period", "label": "Período Largo", "type": "int", "default": 55, "min": 10, "max": 200},
+            {"name": "signal_period", "label": "Período Señal", "type": "int", "default": 13, "min": 2, "max": 50},
+        ],
+    },
+    "TrendFollowing_GoldCross": {
+        "name": "Golden Cross SMA",
+        "category": "Trend Following",
+        "description": "Cruce dorado tradicional de media rápida sobre media lenta para capturar grandes ciclos de mercado.",
+        "parameters": [
+            {"name": "short_ma", "label": "Media Rápida", "type": "int", "default": 50, "min": 5, "max": 100},
+            {"name": "long_ma", "label": "Media Lenta", "type": "int", "default": 200, "min": 50, "max": 500},
+        ],
+    },
+    "TrendFollowing_MACDSlope": {
+        "name": "MACD Slope Trend",
+        "category": "Trend Following",
+        "description": "Seguimiento de tendencia basado en cruce alcista de línea MACD > 0 filtrado por EMA tendencial.",
+        "parameters": [
+            {"name": "fast", "label": "Período Rápido", "type": "int", "default": 12, "min": 2, "max": 50},
+            {"name": "slow", "label": "Período Lento", "type": "int", "default": 26, "min": 10, "max": 100},
+            {"name": "signal", "label": "Período Señal", "type": "int", "default": 9, "min": 2, "max": 50},
+            {"name": "ema", "label": "Período EMA Tendencial", "type": "int", "default": 50, "min": 5, "max": 200},
+        ],
+    },
+    "TrendFollowing_RegresLin": {
+        "name": "Linear Regression Slope Trend",
+        "category": "Trend Following",
+        "description": "Seguimiento de tendencia por pendiente de regresión lineal con ventana de confirmación.",
+        "parameters": [
+            {"name": "reg_window", "label": "Ventana Regresión", "type": "int", "default": 20, "min": 5, "max": 100},
+            {"name": "day_in", "label": "Días de Confirmación", "type": "int", "default": 3, "min": 1, "max": 20},
+        ],
+    },
+    "Momentum_KVOdema": {
+        "name": "KVO + DEMA Momentum",
+        "category": "Momentum",
+        "description": "Klinger Volume Oscillator suavizado con doble media exponencial DEMA.",
+        "parameters": [
+            {"name": "short_period", "label": "Período Corto KVO", "type": "int", "default": 34, "min": 5, "max": 100},
+            {"name": "long_period", "label": "Período Largo KVO", "type": "int", "default": 55, "min": 10, "max": 200},
+            {"name": "dema_kvo", "label": "Período DEMA KVO", "type": "int", "default": 20, "min": 5, "max": 100},
+        ],
+    },
+    "Momentum_RSIStrength": {
+        "name": "RSI Strength Momentum",
+        "category": "Momentum",
+        "description": "Fuerza relativa de RSI confirmada por EMA tendencial.",
+        "parameters": [
+            {"name": "rsi_period", "label": "Período RSI", "type": "int", "default": 14, "min": 2, "max": 50},
+            {"name": "r_in", "label": "Umbral Entrada RSI", "type": "float", "default": 50.0, "min": 20.0, "max": 80.0},
+            {"name": "ema", "label": "Período EMA Tendencial", "type": "int", "default": 200, "min": 20, "max": 300},
+        ],
+    },
+    "TrendFollowing_KVOBullSPT": {
+        "name": "KVO Bull + Supertrend",
+        "category": "Trend Following",
+        "description": "Confirmación doble de ruptura con Klinger Volume Oscillator y trailing stop de Supertrend.",
+        "parameters": [
+            {"name": "short_period", "label": "KVO Corto", "type": "int", "default": 34, "min": 5, "max": 100},
+            {"name": "long_period", "label": "KVO Largo", "type": "int", "default": 55, "min": 10, "max": 200},
+            {"name": "st_lookback", "label": "Lookback Supertrend", "type": "int", "default": 28, "min": 5, "max": 100},
+            {"name": "st_mult", "label": "Multiplicador Supertrend", "type": "float", "default": 3.5, "min": 1.0, "max": 10.0},
+        ],
+    },
+    "TrendFollowing_MACDSlopeSPT": {
+        "name": "MACD Slope + Supertrend",
+        "category": "Trend Following",
+        "description": "Pendiente de MACD con salida dinámica guiada por niveles clave de Supertrend.",
+        "parameters": [
+            {"name": "fast", "label": "Período Rápido", "type": "int", "default": 12, "min": 2, "max": 50},
+            {"name": "slow", "label": "Período Lento", "type": "int", "default": 26, "min": 10, "max": 100},
+            {"name": "signal", "label": "Período Señal", "type": "int", "default": 9, "min": 2, "max": 50},
+            {"name": "ema", "label": "Período EMA Tendencial", "type": "int", "default": 50, "min": 5, "max": 200},
+        ],
+    },
+    "Momentum_ZscoreBull": {
+        "name": "Z-Score Bull Momentum",
+        "category": "Momentum",
+        "description": "Ruptura direccional cuando el Z-score de precio supera el umbral de expansión alcista.",
+        "parameters": [
+            {"name": "period", "label": "Período Z-Score", "type": "int", "default": 20, "min": 5, "max": 100},
+            {"name": "z_thresh", "label": "Umbral Z-Score", "type": "float", "default": 1.5, "min": 0.5, "max": 3.5},
+        ],
+    },
+    "Combo_ZCrossDema": {
+        "name": "Z-Score Cross DEMA Combo",
+        "category": "Combo",
+        "description": "Estrategia cuantitativa híbrida con doble media exponencial DEMA y filtro de Z-Score sobre DEMA con confirmación RSI.",
+        "parameters": [
+            {"name": "dema1", "label": "DEMA Rápida", "type": "int", "default": 14, "min": 2, "max": 50},
+            {"name": "dema2", "label": "DEMA Lenta", "type": "int", "default": 90, "min": 20, "max": 200},
+            {"name": "zscore_period", "label": "Período Z-Score", "type": "int", "default": 112, "min": 20, "max": 250},
+            {"name": "smaz", "label": "Período ZDEMA (SMA Z)", "type": "int", "default": 28, "min": 5, "max": 100},
+            {"name": "rsi", "label": "Período RSI", "type": "int", "default": 14, "min": 2, "max": 50},
+            {"name": "rsi_in", "label": "Umbral Entrada RSI", "type": "float", "default": 30.0, "min": 5.0, "max": 60.0},
+        ],
+    },
+    "Momentum_Zpullback": {
+        "name": "Z-Score Pullback Momentum",
+        "category": "Momentum",
+        "description": "Entrada en retroceso de Z-Score en un activo que mantiene momentum de largo plazo.",
+        "parameters": [
+            {"name": "period", "label": "Período Z", "type": "int", "default": 20, "min": 5, "max": 100},
+            {"name": "pullback_lvl", "label": "Nivel Pullback", "type": "float", "default": -1.0, "min": -3.0, "max": 0.0},
+        ],
+    },
+    "Combo_TrendZpull": {
+        "name": "Trend + Z-Pullback Combo",
+        "category": "Combo",
+        "description": "Filtro de tendencia Supertrend con compras en retrocesos de Z-Score a corto plazo.",
+        "parameters": [
+            {"name": "zscore_period", "label": "Período Z-Score", "type": "int", "default": 48, "min": 5, "max": 200},
+            {"name": "z_lvl", "label": "Nivel Retroceso Z", "type": "float", "default": -1.5, "min": -4.0, "max": 0.0},
+            {"name": "supertnd_look_back", "label": "Lookback Supertrend", "type": "int", "default": 10, "min": 2, "max": 100},
+            {"name": "supertnd_mult", "label": "Multiplicador Supertrend", "type": "float", "default": 3.0, "min": 0.5, "max": 10.0},
+        ],
+    },
+}

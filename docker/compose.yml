@@ -1,0 +1,100 @@
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - ..:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgres://portfonager:portfonager_pass@postgres:5432/portfonager_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - LOCAL_MODE=False
+    depends_on:
+      - postgres
+      - redis
+
+  worker-default:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: celery -A config worker -l info -Q default,marketdata,signals
+    volumes:
+      - ..:/app
+    environment:
+      - DATABASE_URL=postgres://portfonager:portfonager_pass@postgres:5432/portfonager_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+    depends_on:
+      - postgres
+      - redis
+
+  worker-execution:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: celery -A config worker -l info -Q execution -c 4
+    volumes:
+      - ..:/app
+    environment:
+      - DATABASE_URL=postgres://portfonager:portfonager_pass@postgres:5432/portfonager_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+    depends_on:
+      - postgres
+      - redis
+
+  worker-backtest:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: celery -A config worker -l info -Q backtest -c 2
+    volumes:
+      - ..:/app
+    environment:
+      - DATABASE_URL=postgres://portfonager:portfonager_pass@postgres:5432/portfonager_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+    depends_on:
+      - postgres
+      - redis
+
+  beat:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    volumes:
+      - ..:/app
+    environment:
+      - DATABASE_URL=postgres://portfonager:portfonager_pass@postgres:5432/portfonager_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+    depends_on:
+      - postgres
+      - redis
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: portfonager_db
+      POSTGRES_USER: portfonager
+      POSTGRES_PASSWORD: portfonager_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+
+volumes:
+  pgdata:
+  redisdata:
