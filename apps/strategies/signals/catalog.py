@@ -994,6 +994,128 @@ def zs_cross_dema_combox2(data_df, params):
     return final_signals, pd.DataFrame({'ZScore': zscore, 'zDEMA': zdema, 'zdema_slope': zdema_slope, 'rsi': rsi, 'SignalType': signal_type}, index=close.index)
 
 
+def kvo_bull(data_df, params):
+    """
+    Estrategia de Seguimiento de Tendencia: KVO + EMA (TrendFollowing_KVOBull).
+    data_df: DataFrame con OHLCV
+    Params: kvo ([fast, slow]), ema (span)
+    """
+    close = data_df['Close']
+    high = data_df['High']
+    low = data_df['Low']
+    volume = data_df['Volume'] if 'Volume' in data_df.columns else pd.Series(1, index=close.index)
+
+    if isinstance(params, dict):
+        kvo_params = params.get('kvo', [params.get('short_period', 34), params.get('long_period', 55)])
+        ema_span = int(params.get('ema', params.get('signal_period', 200)))
+    elif isinstance(params, (list, tuple)):
+        kvo_params = params[0] if len(params) > 0 else [34, 55]
+        ema_span = int(params[1]) if len(params) > 1 else 200
+    else:
+        kvo_params = [34, 55]
+        ema_span = 200
+
+    fastT = int(kvo_params[0]) if isinstance(kvo_params, (list, tuple)) else 34
+    slowT = int(kvo_params[1]) if isinstance(kvo_params, (list, tuple)) else 55
+
+    hlc3 = (high + low + close) / 3
+    kvo_trend = np.where(hlc3 > hlc3.shift(1), volume * 100, -volume * 100)
+    kvo_fast = pd.Series(kvo_trend, index=close.index).ewm(span=fastT, adjust=False).mean()
+    kvo_slow = pd.Series(kvo_trend, index=close.index).ewm(span=slowT, adjust=False).mean()
+    kvo = kvo_fast - kvo_slow
+
+    ema_0 = close.ewm(span=5, adjust=False).mean()
+    ema_main = close.ewm(span=ema_span, adjust=False).mean()
+
+    bullish_cond = ema_0 > ema_main
+    cond_entry = (kvo > 0) & (kvo.shift(1) < 0) & bullish_cond
+    cond_exit = (close > high.shift(1)) & (ema_0 < ema_main)
+
+    entry_conditions = {'trendfollowing': cond_entry}
+    exit_conditions = {'trendfollowing': cond_exit}
+    valid_mask = kvo.notnull() & ema_main.notnull()
+
+    final_signals, signal_type = generate_signals_multi_state(entry_conditions, exit_conditions, valid_mask)
+    return final_signals, pd.DataFrame({'KVO': kvo, 'EMA_0': ema_0, 'EMA': ema_main, 'SignalType': signal_type}, index=close.index)
+
+
+def trend_zpull(data_df, params):
+    """
+    Estrategia Combo: Tendencia Supertrend + Retrocesos de Z-Score (Combo_TrendZpull).
+    data_df: DataFrame con OHLCV
+    Params: zscore_period, z_lvl, supertnd_look_back, supertnd_mult
+    """
+    close = data_df['Close']
+    high = data_df['High']
+    low = data_df['Low']
+
+    if isinstance(params, dict):
+        zscore_period = int(params.get('zscore_period', 48))
+        z_lvl = float(params.get('z_lvl', -1.5))
+        supertnd_look_back = int(params.get('supertnd_look_back', 10))
+        supertnd_mult = float(params.get('supertnd_mult', 3.0))
+    elif isinstance(params, (list, tuple)):
+        zscore_period = int(params[0]) if len(params) > 0 else 48
+        z_lvl = float(params[1]) if len(params) > 1 else -1.5
+        supertnd_look_back = int(params[2]) if len(params) > 2 else 10
+        supertnd_mult = float(params[3]) if len(params) > 3 else 3.0
+    else:
+        zscore_period, z_lvl, supertnd_look_back, supertnd_mult = 48, -1.5, 10, 3.0
+
+    z_mean = close.rolling(window=zscore_period).mean()
+    z_std = close.rolling(window=zscore_period).std()
+    zscore = (close - z_mean) / z_std
+
+    st_df = calculate_supertrend(data_df, lookback=supertnd_look_back, multiplier=supertnd_mult)
+    supertrend_val = st_df['supertrend']
+
+    cond_signal_long1 = (zscore > z_lvl) & (zscore.shift(1) < z_lvl)
+    cond_signal_long2 = close > supertrend_val
+    entry_cond = cond_signal_long1 | cond_signal_long2
+
+    cond_out_1 = (~cond_signal_long1) & (~cond_signal_long2) & (close > high.shift(1))
+    cond_out_2 = (close < supertrend_val) & (supertrend_val.shift(1) > close.shift(1))
+    exit_cond = cond_out_1 | cond_out_2
+
+    entry_conditions = {'trendfollowing': entry_cond}
+    exit_conditions = {'trendfollowing': exit_cond}
+    valid_mask = zscore.notnull() & supertrend_val.notnull()
+
+    final_signals, signal_type = generate_signals_multi_state(entry_conditions, exit_conditions, valid_mask)
+    return final_signals, pd.DataFrame({'ZScore': zscore, 'Supertrend': supertrend_val, 'SignalType': signal_type}, index=close.index)
+
+
+def zs_pull(data_df, params):
+    """
+    Estrategia de Retroceso de Z-Score (Momentum_Zpullback).
+    data_df: DataFrame con OHLCV
+    Params: period, pullback_lvl
+    """
+    close = data_df['Close']
+    high = data_df['High']
+
+    if isinstance(params, dict):
+        zscore_period = int(params.get('period', params.get('zscore_period', 20)))
+        z_lvl = float(params.get('pullback_lvl', params.get('z_lvl', -1.0)))
+    elif isinstance(params, (list, tuple)):
+        zscore_period = int(params[0]) if len(params) > 0 else 20
+        z_lvl = float(params[1]) if len(params) > 1 else -1.0
+    else:
+        zscore_period, z_lvl = 20, -1.0
+
+    z_mean = close.rolling(window=zscore_period).mean()
+    z_std = close.rolling(window=zscore_period).std()
+    zscore = (close - z_mean) / z_std
+
+    entry_cond = (zscore > z_lvl) & (zscore.shift(1) < z_lvl)
+    exit_cond = close > high.shift(1)
+    valid_mask = zscore.notnull()
+
+    entry_conditions = {'meanreversion': entry_cond}
+    exit_conditions = {'meanreversion': exit_cond}
+    final_signals, signal_type = generate_signals_multi_state(entry_conditions, exit_conditions, valid_mask)
+    return final_signals, pd.DataFrame({'ZScore': zscore, 'SignalType': signal_type}, index=close.index)
+
 
 # Diccionario de registro para fácil acceso
 STRATEGY_MAP = {
@@ -1016,6 +1138,8 @@ STRATEGY_MAP = {
     'macd_slope': macd_slope,
     'TrendFollowing_MACDSlopeSPT': macd_slope_spt,
     'macd_slope_spt': macd_slope_spt,
+    'TrendFollowing_KVOBull': kvo_bull,
+    'kvo_bull': kvo_bull,
     'TrendFollowing_KVOBullSPT': kvo_bull_spt,
     'TrendFollowing_ZScoreBull': zscore_bull,
     'Momentum_ZscoreBull': zscore_bull,
@@ -1023,4 +1147,9 @@ STRATEGY_MAP = {
     'Combo_ZCrossDema': zs_cross_dema_combox2,
     'buy_the_zdip': buy_the_zdip,
     'buy_the_zbounce': buy_the_zbounce,
+    'Combo_TrendZpull': trend_zpull,
+    'trend_zpull': trend_zpull,
+    'trendZpull': trend_zpull,
+    'Momentum_Zpullback': zs_pull,
+    'zs_pull': zs_pull,
 }

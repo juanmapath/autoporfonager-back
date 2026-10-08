@@ -17,6 +17,13 @@ class OrderDispatcher:
     """
 
     def dispatch_intent(self, intent: OrderIntent) -> Order:
+        existing_order = Order.objects.filter(intent=intent).first()
+        if existing_order:
+            if intent.status != "dispatched":
+                intent.status = "dispatched"
+                intent.save(update_fields=["status"])
+            return existing_order
+
         portfolio = intent.run.portfolio
         broker_account = intent.broker_account
         side = "buy" if intent.net_delta_qty > 0 else "sell"

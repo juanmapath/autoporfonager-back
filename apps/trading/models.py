@@ -50,13 +50,14 @@ class Target(ImmutableModel):
         return f"Target {self.strategy.slug} -> {self.instrument.symbol}: delta={self.delta_qty} ({self.reason})"
 
 
-class OrderIntent(ImmutableModel):
+class OrderIntent(models.Model):
     """Netted net delta per (broker_account, instrument) with deterministic idempotency key."""
     STATUS_CHOICES = (
         ("pending", "Pending"),
         ("dispatched", "Dispatched"),
         ("cancelled", "Cancelled"),
     )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     run = models.ForeignKey(RebalanceRun, on_delete=models.CASCADE, related_name="intents")
     broker_account = models.ForeignKey(BrokerAccount, on_delete=models.CASCADE, null=True, blank=True)
     instrument = models.ForeignKey(Instrument, on_delete=models.CASCADE)
