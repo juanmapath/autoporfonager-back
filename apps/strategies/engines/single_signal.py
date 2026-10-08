@@ -1,5 +1,7 @@
 from typing import Dict, Any, Tuple
 from decimal import Decimal
+import math
+import numpy as np
 import pandas as pd
 from apps.strategies.engines.base import BaseEngine
 from apps.strategies.signals.catalog import STRATEGY_MAP
@@ -50,11 +52,18 @@ class SingleSignalEngine(BaseEngine):
             exposure = weight if last_signal > 0 else Decimal("0.0")
             targets[symbol] = exposure
 
-            # Store last indicator diagnostics
+            # Store last indicator diagnostics (sanitize NaNs/Infs for valid PostgreSQL JSON)
             last_ind = {}
             if isinstance(indicators, pd.DataFrame) and not indicators.empty:
                 last_row = indicators.iloc[-1].to_dict()
-                last_ind = {k: float(v) if isinstance(v, (int, float)) else str(v) for k, v in last_row.items()}
+                for k, v in last_row.items():
+                    if pd.isna(v) or v is None:
+                        last_ind[k] = None
+                    elif isinstance(v, (int, float, np.number)):
+                        last_ind[k] = None if (np.isnan(v) or np.isinf(v)) else float(v)
+                    else:
+                        last_ind[k] = str(v)
+
             diagnostics[symbol] = {
                 "raw_signal": last_signal,
                 "exposure": str(exposure),

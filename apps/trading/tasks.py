@@ -19,6 +19,39 @@ from core.market_time import is_trading_day, get_ny_now
 logger = logging.getLogger(__name__)
 
 
+def sanitize_json_for_db(val):
+    """
+    Recursively sanitize objects for PostgreSQL JSON/JSONB.
+    Replaces NaN, Inf, and -Inf with None (null in JSON).
+    Converts numpy numeric types and Decimals to standard Python types.
+    """
+    import math
+    import numpy as np
+    from decimal import Decimal
+
+    if val is None:
+        return None
+    if isinstance(val, dict):
+        return {str(k): sanitize_json_for_db(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple, set)):
+        return [sanitize_json_for_db(v) for v in val]
+    if isinstance(val, (float, np.floating)):
+        return None if (math.isnan(val) or math.isinf(val)) else float(val)
+    if isinstance(val, (int, np.integer)):
+        return int(val)
+    if isinstance(val, Decimal):
+        return float(val) if val.is_finite() else None
+    if isinstance(val, bool):
+        return val
+    try:
+        import pandas as pd
+        if pd.isna(val):
+            return None
+    except Exception:
+        pass
+    return str(val)
+
+
 @shared_task(name="marketdata_refresh", queue="marketdata")
 def marketdata_refresh():
     """Descarga barras incrementales y LatestQuote de todos los instrumentos activos."""
@@ -72,14 +105,16 @@ def compute_regimes_and_signals():
                 if inst:
                     last_sig = Signal.objects.filter(version=v, instrument=inst).order_by("-as_of").first()
                     changed = (last_sig.target_exposure != exposure) if last_sig else True
+                    clean_diag = sanitize_json_for_db(diagnostics.get(sym, {}))
                     Signal.objects.create(
                         version=v,
                         instrument=inst,
                         as_of=timezone.now(),
                         target_exposure=exposure,
                         changed=changed,
-                        diagnostics=diagnostics.get(sym, {}),
+                        diagnostics=clean_diag,
                     )
+
                     signals_computed += 1
         except Exception as e:
             logger.error(f"Error computing signal for {strat.slug} v{v.version}: {e}")

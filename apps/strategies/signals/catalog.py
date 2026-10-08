@@ -92,6 +92,9 @@ def calculate_supertrend(df, lookback=28, multiplier=3.5):
     """
     Cálculo genérico de Supertrend indicador.
     """
+    lookback = int(lookback)
+    multiplier = float(multiplier)
+
     high = df['High']
     low = df['Low']
     close = df['Close']
@@ -160,11 +163,11 @@ def lowest_low(data_df, params):
     high = data_df['High']
 
     if isinstance(params, dict):
-        lookback = params.get('lookback', 20)
-        sl_val = params.get('sl', params.get('stop_loss', 5.0))
+        lookback = int(params.get('lookback', 20))
+        sl_val = float(params.get('sl', params.get('stop_loss', 5.0)))
     elif isinstance(params, (list, tuple)):
-        lookback = params[0] if len(params) > 0 else 20
-        sl_val = params[1] if len(params) > 1 else 5.0
+        lookback = int(params[0]) if len(params) > 0 else 20
+        sl_val = float(params[1]) if len(params) > 1 else 5.0
     else:
         lookback = 20
         sl_val = 5.0
@@ -190,9 +193,18 @@ def buy_the_zdip(data_df, params):
     """
     data = data_df['Close']
 
-    zwindow = params.get('zwindow', 10)
-    zdema_period = params.get('zdema_period', 10)
-    zthreshold = params.get('zthreshold', -2)
+    if isinstance(params, dict):
+        zwindow = int(params.get('zwindow', 10))
+        zdema_period = int(params.get('zdema_period', 10))
+        zthreshold = float(params.get('zthreshold', -2))
+    elif isinstance(params, (list, tuple)):
+        zwindow = int(params[0]) if len(params) > 0 else 10
+        zdema_period = int(params[1]) if len(params) > 1 else 10
+        zthreshold = float(params[2]) if len(params) > 2 else -2.0
+    else:
+        zwindow = 10
+        zdema_period = 10
+        zthreshold = -2.0
 
     zmean = data.rolling(window=zwindow).mean()
     zstd = data.rolling(window=zwindow).std()
@@ -220,9 +232,18 @@ def buy_the_zbounce(data_df, params):
     """
     data = data_df['Close']
 
-    zwindow = params.get('zwindow', 10)
-    zdema_period = params.get('zdema_period', 10)
-    zthreshold = params.get('zthreshold', -2)
+    if isinstance(params, dict):
+        zwindow = int(params.get('zwindow', 10))
+        zdema_period = int(params.get('zdema_period', 10))
+        zthreshold = float(params.get('zthreshold', -2))
+    elif isinstance(params, (list, tuple)):
+        zwindow = int(params[0]) if len(params) > 0 else 10
+        zdema_period = int(params[1]) if len(params) > 1 else 10
+        zthreshold = float(params[2]) if len(params) > 2 else -2.0
+    else:
+        zwindow = 10
+        zdema_period = 10
+        zthreshold = -2.0
 
     zmean = data.rolling(window=zwindow).mean()
     zstd = data.rolling(window=zwindow).std()
@@ -231,6 +252,7 @@ def buy_the_zbounce(data_df, params):
     ze1 = zscore.ewm(span=zdema_period, adjust=False).mean()
     ze2 = ze1.ewm(span=zdema_period, adjust=False).mean()
     zdema = 2 * ze1 - ze2
+
 
     high = data_df['High']
     long_mask = (zdema.shift() < zthreshold) & (zdema > zthreshold)
@@ -254,14 +276,14 @@ def rsi_weakness(data_df, params):
     high = data_df['High']
 
     if isinstance(params, dict):
-        rsi_period = params.get('rsi_period', 14)
-        rsi_lower = params.get('rsi_lower', 30)
+        rsi_period = int(params.get('rsi_period', 14))
+        rsi_lower = float(params.get('rsi_lower', 30))
     elif isinstance(params, (list, tuple)):
-        rsi_period = params[0] if len(params) > 0 else 14
-        rsi_lower = params[1] if len(params) > 1 else 30
+        rsi_period = int(params[0]) if len(params) > 0 else 14
+        rsi_lower = float(params[1]) if len(params) > 1 else 30.0
     else:
         rsi_period = 14
-        rsi_lower = 30
+        rsi_lower = 30.0
 
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=rsi_period).mean()
@@ -291,11 +313,11 @@ def bollinger_bands(data_df, params):
     high = data_df['High']
 
     if isinstance(params, dict):
-        ma = params.get('ma', 20)
-        mult = params.get('mult', 2.0)
+        ma = int(params.get('ma', 20))
+        mult = float(params.get('mult', 2.0))
     elif isinstance(params, (list, tuple)):
-        ma = params[0] if len(params) > 0 else 20
-        mult = params[1] if len(params) > 1 else 2.0
+        ma = int(params[0]) if len(params) > 0 else 20
+        mult = float(params[1]) if len(params) > 1 else 2.0
     else:
         ma = 20
         mult = 2.0
@@ -328,16 +350,16 @@ def money_flow_index(data_df, params):
     volume = data_df['Volume'] if 'Volume' in data_df.columns else pd.Series(1, index=close.index)
 
     if isinstance(params, dict):
-        mfi_periods = params.get('mfi_periods', 14)
-        in_mfi = params.get('in_mfi', 20)
-        days_in = params.get('days_in', 5)
+        mfi_periods = int(params.get('mfi_periods', 14))
+        in_mfi = float(params.get('in_mfi', 20))
+        days_in = int(params.get('days_in', 5))
     elif isinstance(params, (list, tuple)):
-        mfi_periods = params[0] if len(params) > 0 else 14
-        in_mfi = params[1] if len(params) > 1 else 20
-        days_in = params[2] if len(params) > 2 else 5
+        mfi_periods = int(params[0]) if len(params) > 0 else 14
+        in_mfi = float(params[1]) if len(params) > 1 else 20.0
+        days_in = int(params[2]) if len(params) > 2 else 5
     else:
         mfi_periods = 14
-        in_mfi = 20
+        in_mfi = 20.0
         days_in = 5
 
     tp = (high + low + close) / 3
@@ -377,17 +399,17 @@ def regression_rsi_short(data_df, params):
     low = data_df['Low']
 
     if isinstance(params, dict):
-        day_reg = params.get('day_reg', params.get('regression_period', 10))
-        rsi_win = params.get('rsi_win', params.get('rsi_period', 14))
-        rsi_upper = params.get('rsi_upper', 70)
+        day_reg = int(params.get('day_reg', params.get('regression_period', 10)))
+        rsi_win = int(params.get('rsi_win', params.get('rsi_period', 14)))
+        rsi_upper = float(params.get('rsi_upper', 70))
     elif isinstance(params, (list, tuple)):
-        day_reg = params[0] if len(params) > 0 else 10
-        rsi_win = params[1] if len(params) > 1 else 14
-        rsi_upper = params[2] if len(params) > 2 else 70
+        day_reg = int(params[0]) if len(params) > 0 else 10
+        rsi_win = int(params[1]) if len(params) > 1 else 14
+        rsi_upper = float(params[2]) if len(params) > 2 else 70.0
     else:
         day_reg = 10
         rsi_win = 14
-        rsi_upper = 70
+        rsi_upper = 70.0
 
     # Pendiente de regresión lineal móvil
     y = close.values
@@ -406,6 +428,7 @@ def regression_rsi_short(data_df, params):
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=rsi_win).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_win).mean()
+
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
 
@@ -431,13 +454,13 @@ def golden_cross(data_df, params):
     close = data_df['Close']
 
     if isinstance(params, dict):
-        ema1 = params.get('ema1', params.get('window_rapid', 50))
-        ema2 = params.get('ema2', params.get('window_slow', 200))
-        cooldown = params.get('cooldown', 16)
+        ema1 = int(params.get('ema1', params.get('window_rapid', 50)))
+        ema2 = int(params.get('ema2', params.get('window_slow', 200)))
+        cooldown = int(params.get('cooldown', 16))
     elif isinstance(params, (list, tuple)):
-        ema1 = params[0] if len(params) > 0 else 50
-        ema2 = params[1] if len(params) > 1 else 200
-        cooldown = params[2] if len(params) > 2 else 16
+        ema1 = int(params[0]) if len(params) > 0 else 50
+        ema2 = int(params[1]) if len(params) > 1 else 200
+        cooldown = int(params[2]) if len(params) > 2 else 16
     else:
         ema1 = 50
         ema2 = 200
@@ -488,19 +511,19 @@ def kvo_bull_spt(data_df, params):
 
     if isinstance(params, dict):
         kvo_params = params.get('kvo', [7, 28])
-        ema_span = params.get('ema', 200)
-        cooldown = params.get('cooldown', 12)
+        ema_span = int(params.get('ema', 200))
+        cooldown = int(params.get('cooldown', 12))
     elif isinstance(params, (list, tuple)):
         kvo_params = params[0] if len(params) > 0 else [7, 28]
-        ema_span = params[1] if len(params) > 1 else 200
-        cooldown = params[2] if len(params) > 2 else 12
+        ema_span = int(params[1]) if len(params) > 1 else 200
+        cooldown = int(params[2]) if len(params) > 2 else 12
     else:
         kvo_params = [7, 28]
         ema_span = 200
         cooldown = 12
 
-    fastT = kvo_params[0] if isinstance(kvo_params, (list, tuple)) else 7
-    slowT = kvo_params[1] if isinstance(kvo_params, (list, tuple)) else 28
+    fastT = int(kvo_params[0]) if isinstance(kvo_params, (list, tuple)) else 7
+    slowT = int(kvo_params[1]) if isinstance(kvo_params, (list, tuple)) else 28
 
     # Indicador KVO
     hlc3 = (high + low + close) / 3
@@ -557,17 +580,17 @@ def macd_slope(data_df, params):
 
     if isinstance(params, dict):
         macd_inputs = params.get('macd', [12, 26, 9])
-        ema_span = params.get('ema', 200)
+        ema_span = int(params.get('ema', 200))
     elif isinstance(params, (list, tuple)):
         macd_inputs = params[0] if len(params) > 0 else [12, 26, 9]
-        ema_span = params[1] if len(params) > 1 else 200
+        ema_span = int(params[1]) if len(params) > 1 else 200
     else:
         macd_inputs = [12, 26, 9]
         ema_span = 200
 
-    fast_period = macd_inputs[0] if isinstance(macd_inputs, (list, tuple)) else 12
-    slow_period = macd_inputs[1] if isinstance(macd_inputs, (list, tuple)) else 26
-    signal_period = macd_inputs[2] if isinstance(macd_inputs, (list, tuple)) else 9
+    fast_period = int(macd_inputs[0]) if isinstance(macd_inputs, (list, tuple)) else 12
+    slow_period = int(macd_inputs[1]) if isinstance(macd_inputs, (list, tuple)) else 26
+    signal_period = int(macd_inputs[2]) if isinstance(macd_inputs, (list, tuple)) else 9
 
     ema_fast = close.ewm(span=fast_period, adjust=False).mean()
     ema_slow = close.ewm(span=slow_period, adjust=False).mean()
@@ -607,20 +630,20 @@ def macd_slope_spt(data_df, params):
 
     if isinstance(params, dict):
         macd_inputs = params.get('macd', [12, 26, 9])
-        ema_span = params.get('ema', 200)
-        cooldown = params.get('cooldown', 21)
+        ema_span = int(params.get('ema', 200))
+        cooldown = int(params.get('cooldown', 21))
     elif isinstance(params, (list, tuple)):
         macd_inputs = params[0] if len(params) > 0 else [12, 26, 9]
-        ema_span = params[1] if len(params) > 1 else 200
-        cooldown = params[2] if len(params) > 2 else 21
+        ema_span = int(params[1]) if len(params) > 1 else 200
+        cooldown = int(params[2]) if len(params) > 2 else 21
     else:
         macd_inputs = [12, 26, 9]
         ema_span = 200
         cooldown = 21
 
-    fast_period = macd_inputs[0] if isinstance(macd_inputs, (list, tuple)) else 12
-    slow_period = macd_inputs[1] if isinstance(macd_inputs, (list, tuple)) else 26
-    signal_period = macd_inputs[2] if isinstance(macd_inputs, (list, tuple)) else 9
+    fast_period = int(macd_inputs[0]) if isinstance(macd_inputs, (list, tuple)) else 12
+    slow_period = int(macd_inputs[1]) if isinstance(macd_inputs, (list, tuple)) else 26
+    signal_period = int(macd_inputs[2]) if isinstance(macd_inputs, (list, tuple)) else 9
 
     ema_fast = close.ewm(span=fast_period, adjust=False).mean()
     ema_slow = close.ewm(span=slow_period, adjust=False).mean()
@@ -671,23 +694,23 @@ def trend_pull_back_rsi(data_df, params):
     close = data_df['Close']
 
     if isinstance(params, dict):
-        rsi_window = params.get('rsi_window', params.get('rsi_period', 14))
-        out_rsi = params.get('out_rsi', 70)
-        in_rsi = params.get('in_rsi', params.get('rsi_lower', 30))
-        ma_slow = params.get('ma_slow', 200)
-        ma_fast = params.get('ma_fast', 50)
-        cooldown = params.get('cooldown', 7)
+        rsi_window = int(params.get('rsi_window', params.get('rsi_period', 14)))
+        out_rsi = float(params.get('out_rsi', 70))
+        in_rsi = float(params.get('in_rsi', params.get('rsi_lower', 30)))
+        ma_slow = int(params.get('ma_slow', 200))
+        ma_fast = int(params.get('ma_fast', 50))
+        cooldown = int(params.get('cooldown', 7))
     elif isinstance(params, (list, tuple)):
-        rsi_window = params[0] if len(params) > 0 else 14
-        out_rsi = params[1] if len(params) > 1 else 70
-        in_rsi = params[2] if len(params) > 2 else 30
-        ma_slow = params[3] if len(params) > 3 else 200
-        ma_fast = params[4] if len(params) > 4 else 50
-        cooldown = params[5] if len(params) > 5 else 7
+        rsi_window = int(params[0]) if len(params) > 0 else 14
+        out_rsi = float(params[1]) if len(params) > 1 else 70.0
+        in_rsi = float(params[2]) if len(params) > 2 else 30.0
+        ma_slow = int(params[3]) if len(params) > 3 else 200
+        ma_fast = int(params[4]) if len(params) > 4 else 50
+        cooldown = int(params[5]) if len(params) > 5 else 7
     else:
         rsi_window = 14
-        out_rsi = 70
-        in_rsi = 30
+        out_rsi = 70.0
+        in_rsi = 30.0
         ma_slow = 200
         ma_fast = 50
         cooldown = 7
@@ -744,20 +767,20 @@ def buy_weakness(data_df, params):
 
     if isinstance(params, dict):
         macd_inputs = params.get('macd', [12, 26, 9])
-        weak_in = params.get('weak_in', 5)
-        wr_period = params.get('wr', 14)
+        weak_in = float(params.get('weak_in', 5))
+        wr_period = int(params.get('wr', 14))
     elif isinstance(params, (list, tuple)):
         macd_inputs = params[0] if len(params) > 0 else [12, 26, 9]
-        weak_in = params[1] if len(params) > 1 else 5
-        wr_period = params[2] if len(params) > 2 else 14
+        weak_in = float(params[1]) if len(params) > 1 else 5.0
+        wr_period = int(params[2]) if len(params) > 2 else 14
     else:
         macd_inputs = [12, 26, 9]
-        weak_in = 5
+        weak_in = 5.0
         wr_period = 14
 
-    fast_period = macd_inputs[0] if isinstance(macd_inputs, (list, tuple)) else 12
-    slow_period = macd_inputs[1] if isinstance(macd_inputs, (list, tuple)) else 26
-    signal_period = macd_inputs[2] if isinstance(macd_inputs, (list, tuple)) else 9
+    fast_period = int(macd_inputs[0]) if isinstance(macd_inputs, (list, tuple)) else 12
+    slow_period = int(macd_inputs[1]) if isinstance(macd_inputs, (list, tuple)) else 26
+    signal_period = int(macd_inputs[2]) if isinstance(macd_inputs, (list, tuple)) else 9
 
     # DEMA 5
     e1 = close.ewm(span=5, adjust=False).mean()
@@ -836,15 +859,15 @@ def zscore_bull(data_df, params):
     close = data_df['Close']
 
     if isinstance(params, dict):
-        zscore_period = params.get('zscore_period', 20)
-        z_in = params.get('z_in', 1.0)
-        days_in = params.get('days_in', 10)
-        ema_span = params.get('ema', 200)
+        zscore_period = int(params.get('zscore_period', 20))
+        z_in = float(params.get('z_in', 1.0))
+        days_in = int(params.get('days_in', 10))
+        ema_span = int(params.get('ema', 200))
     elif isinstance(params, (list, tuple)):
-        zscore_period = params[0] if len(params) > 0 else 20
-        z_in = params[1] if len(params) > 1 else 1.0
-        days_in = params[2] if len(params) > 2 else 10
-        ema_span = params[3] if len(params) > 3 else 200
+        zscore_period = int(params[0]) if len(params) > 0 else 20
+        z_in = float(params[1]) if len(params) > 1 else 1.0
+        days_in = int(params[2]) if len(params) > 2 else 10
+        ema_span = int(params[3]) if len(params) > 3 else 200
     else:
         zscore_period = 20
         z_in = 1.0
@@ -855,6 +878,7 @@ def zscore_bull(data_df, params):
     z_mean = close.rolling(window=zscore_period).mean()
     z_std = close.rolling(window=zscore_period).std()
     zscore = (close - z_mean) / z_std
+
 
     # EMAs
     ema_0 = close.ewm(span=5, adjust=False).mean()
