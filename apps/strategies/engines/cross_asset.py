@@ -19,15 +19,27 @@ class CrossAssetEngine(BaseEngine):
     ) -> Tuple[Dict[str, Decimal], Dict[str, Any]]:
         source_symbol = params.get("source_symbol")
         strat_func_name = params.get("strategy_name")
+        strat_params = params.get("params", {})
+
+        if not strat_func_name and "strategies" in params and params["strategies"]:
+            first_s = params["strategies"][0]
+            if isinstance(first_s, dict):
+                strat_func_name = first_s.get("strategy_name")
+                strat_params = first_s.get("params", strat_params)
+            elif isinstance(first_s, str):
+                strat_func_name = first_s
+
         strat_func = STRATEGY_MAP.get(strat_func_name)
         if not strat_func:
             raise ValueError(f"Strategy '{strat_func_name}' not found.")
+
 
         source_df = ohlcv_data.get(source_symbol)
         if source_df is None or source_df.empty:
             return {sym: Decimal("0.0") for sym in instruments_weights}, {"error": "Missing source asset data"}
 
-        signals, ind = strat_func(source_df, params.get("params", {}))
+        signals, ind = strat_func(source_df, strat_params)
+
         last_sig = int(signals.iloc[-1]) if not signals.empty else 0
 
         targets = {}

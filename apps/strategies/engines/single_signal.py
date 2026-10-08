@@ -18,11 +18,22 @@ class SingleSignalEngine(BaseEngine):
         instruments_weights: Dict[str, Decimal],
     ) -> Tuple[Dict[str, Decimal], Dict[str, Any]]:
         strategy_func_name = params.get("strategy_name") or params.get("strategy_function")
+
+        strategy_params = params.get("strategy_params", params.get("params", {}))
+
+        # Soporte para bots donde la estrategia viene en params["strategies"] = [{"strategy_name": ..., "params": ...}]
+        if not strategy_func_name and "strategies" in params and params["strategies"]:
+            first_s = params["strategies"][0]
+            if isinstance(first_s, dict):
+                strategy_func_name = first_s.get("strategy_name")
+                strategy_params = first_s.get("params", strategy_params)
+            elif isinstance(first_s, str):
+                strategy_func_name = first_s
+
         strat_func = STRATEGY_MAP.get(strategy_func_name)
         if not strat_func:
             raise ValueError(f"Strategy function '{strategy_func_name}' not found in centralized catalog.")
 
-        strategy_params = params.get("strategy_params", params.get("params", {}))
         targets = {}
         diagnostics = {}
 

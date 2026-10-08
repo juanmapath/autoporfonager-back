@@ -897,13 +897,24 @@ def zs_cross_dema_combox2(data_df, params):
     close = data_df['Close']
     high = data_df['High']
     
-    # Parámetros (default coincidentes con test_model_4.py)
-    w_rapid = params.get('window_rapid', 14)
-    w_slow = params.get('window_slow', 90)
-    z_period = params.get('zscore_period', 112)
-    zd_period = params.get('zdema_period', 28)
-    rsi_p = params.get('rsi_period', 3)
-    rsi_low = params.get('rsi_lower', 30)
+    # Parámetros (soporta dict o list/tuple de la UI)
+    if isinstance(params, dict):
+        w_rapid = int(params.get('window_rapid', 14))
+        w_slow = int(params.get('window_slow', 90))
+        z_period = int(params.get('zscore_period', 112))
+        zd_period = int(params.get('zdema_period', 28))
+        rsi_p = int(params.get('rsi_period', 3))
+        rsi_low = float(params.get('rsi_lower', 30))
+    elif isinstance(params, (list, tuple)):
+        w_rapid = int(params[0]) if len(params) > 0 else 14
+        w_slow = int(params[1]) if len(params) > 1 else 90
+        z_period = int(params[2]) if len(params) > 2 else 112
+        zd_period = int(params[3]) if len(params) > 3 else 28
+        rsi_p = int(params[4]) if len(params) > 4 else 3
+        rsi_low = float(params[5]) if len(params) > 5 else 30
+    else:
+        w_rapid, w_slow, z_period, zd_period, rsi_p, rsi_low = 14, 90, 112, 28, 3, 30
+
 
     # 1. DEMA Rapid/Slow (adjust=True coincide exactamente con test_model_4.py)
     e1_r = close.ewm(span=w_rapid, adjust=True).mean()

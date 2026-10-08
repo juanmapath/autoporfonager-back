@@ -18,8 +18,18 @@ class MultiSignalEngine(BaseEngine):
         params: Dict[str, Any],
         instruments_weights: Dict[str, Decimal],
     ) -> Tuple[Dict[str, Decimal], Dict[str, Any]]:
-        strategies: List[str] = params.get("strategies", [])
-        strategies_params: List[Any] = params.get("strategies_params", [])
+        raw_strategies = params.get("strategies", [])
+
+        strategies: List[str] = []
+        strategies_params: List[Any] = []
+        if raw_strategies and isinstance(raw_strategies[0], dict):
+            for item in raw_strategies:
+                strategies.append(item.get("strategy_name"))
+                strategies_params.append(item.get("params", []))
+        else:
+            strategies = raw_strategies
+            strategies_params = params.get("strategies_params", [])
+
 
         targets = {}
         diagnostics = {}
