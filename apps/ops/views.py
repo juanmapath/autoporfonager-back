@@ -144,6 +144,9 @@ class OpsRecommendedPortfoliosView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+from django.utils import timezone
+
+
 class OpsBacktestView(APIView):
     permission_classes = [permissions.IsAdminUser]
 
@@ -152,38 +155,44 @@ class OpsBacktestView(APIView):
         return Response(BacktestRunSerializer(runs, many=True).data)
 
     def post(self, request):
-        strat_slug = request.data.get("strategy_slug", "MeanRev_WeakRSI")
-        symbol = request.data.get("symbol", "QQQ")
-        initial_capital = float(request.data.get("initial_capital", 100000.0))
-        params = request.data.get("params", {})
+        strategy_id = request.data.get("strategy_id")
+        strat_slug = request.data.get("strategy_slug")
+        strat = None
+        if strategy_id:
+            strat = Strategy.objects.filter(id=strategy_id).first()
+        elif strat_slug:
+            strat = Strategy.objects.filter(slug=strat_slug).first()
 
-        strat = Strategy.objects.filter(slug=strat_slug).first()
-        v = strat.versions.filter(status="live").first() if strat else None
+        if not strat:
+            strat = Strategy.objects.filter(is_active=True).first() or Strategy.objects.first()
+
+        if not strat:
+            return Response({"error": "No hay estrategias configuradas en la base de datos."}, status=status.HTTP_400_BAD_REQUEST)
+
+        today_str = timezone.now().strftime("%Y-%m-%d")
+        default_start = (timezone.now() - pd.Timedelta(days=730)).strftime("%Y-%m-%d")
+        start_date = str(request.data.get("start_date") or default_start)
+        end_date = str(request.data.get("end_date") or today_str)
+        initial_capital = float(request.data.get("initial_capital", 100000.0))
+        leverage = float(request.data.get("leverage", 1.0))
+
+        v = strat.versions.filter(status="live").first() or strat.versions.order_by("-version").first()
+        traded_inst = v.instruments.filter(role="traded").first() if v else None
+        traded_sym = traded_inst.instrument.symbol if traded_inst else "QQQ"
 
         run = BacktestRun.objects.create(
             version=v,
-            strategy_slug=strat_slug,
-            instruments=[symbol],
-            start_date="2023-01-01",
-            end_date="2024-01-01",
+            strategy_slug=strat.slug,
+            instruments=[traded_sym],
+            start_date=start_date,
+            end_date=end_date,
             initial_capital=Decimal(str(initial_capital)),
             status="running",
         )
 
         try:
-            # Generate sample trend series or fetch real bars for test
-            dates = pd.date_range(start="2023-01-01", end="2024-01-01", freq="B")
-            prices = 250.0 + (pd.Series(range(len(dates))) * 0.2) + (pd.Series(range(len(dates))).apply(lambda x: (x % 5) - 2))
-            df = pd.DataFrame({
-                "Open": prices,
-                "High": prices + 1.5,
-                "Low": prices - 1.5,
-                "Close": prices,
-                "Volume": 50000000.0,
-            }, index=dates)
-
             engine = BacktestEngine(initial_cash=initial_capital)
-            res = engine.run(df, strat_slug, params)
+            res = engine.run_for_strategy(strat, start_date=start_date, end_date=end_date, leverage=leverage)
 
             run.status = "done"
             run.metrics = {
@@ -191,14 +200,25 @@ class OpsBacktestView(APIView):
                 "cagr_pct": res["cagr_pct"],
                 "max_drawdown_pct": res["max_drawdown_pct"],
                 "sharpe_ratio": res["sharpe_ratio"],
+                "sortino_ratio": res["sortino_ratio"],
                 "win_rate_pct": res["win_rate_pct"],
                 "profit_factor": res["profit_factor"],
                 "total_trades": res["total_trades"],
+                "final_value": res["final_value"],
+                "benchmark_final_value": res["benchmark_final_value"],
+                "benchmark_roi_pct": res["benchmark_roi_pct"],
+                "benchmark_cagr_pct": res["benchmark_cagr_pct"],
+                "benchmark_max_drawdown_pct": res["benchmark_max_drawdown_pct"],
+                "alpha_vs_benchmark": res["alpha_vs_benchmark"],
+                "trades": res.get("trades", []),
             }
             run.equity_curve = res["equity_curve"]
             run.save()
 
-            return Response(BacktestRunSerializer(run).data, status=status.HTTP_201_CREATED)
+            data = BacktestRunSerializer(run).data
+            data["trades"] = res.get("trades", [])
+            data["symbol"] = res.get("symbol", traded_sym)
+            return Response(data, status=status.HTTP_201_CREATED)
         except Exception as e:
             run.status = "failed"
             run.error_message = str(e)
