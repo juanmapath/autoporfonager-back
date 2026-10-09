@@ -16,8 +16,8 @@ class MarketDataService:
     def __init__(self, provider=None):
         self.provider = provider or YahooProvider()
 
-    def sync_bars(self, symbol: str, days: int = 180) -> int:
-        """Fetches and updates historical daily bars for the given instrument symbol."""
+    def sync_bars(self, symbol: str, days: int = 730) -> int:
+        """Fetches and updates historical daily bars for the given instrument symbol (defaults to 2 years for indicator warmup)."""
         instrument, _ = Instrument.objects.get_or_create(symbol=symbol)
         start_dt = dj_timezone.now() - timedelta(days=days)
         yahoo_sym = instrument.yahoo_symbol or symbol

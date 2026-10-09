@@ -59,7 +59,9 @@ def marketdata_refresh():
     svc = MarketDataService()
     instruments = Instrument.objects.filter(tradable=True)
     for inst in instruments:
-        svc.sync_bars(inst.symbol, days=30)
+        bar_count = Bar.objects.filter(instrument=inst).count()
+        days_to_sync = 730 if bar_count < 300 else 60
+        svc.sync_bars(inst.symbol, days=days_to_sync)
         svc.update_latest_quote(inst.symbol)
     return f"Refreshed {instruments.count()} instruments"
 
@@ -82,6 +84,13 @@ def compute_regimes_and_signals():
         for si in instruments:
             sym = si.instrument.symbol
             weights[sym] = si.weight
+
+            # Auto-warmup: si el instrumento no cuenta con al menos 300 barras históricas en BD,
+            # sincronizar automáticamente 2 años (730 días) para estabilizar EMAs y SMA(200).
+            if Bar.objects.filter(instrument=si.instrument).count() < 300:
+                from apps.marketdata.services import MarketDataService
+                MarketDataService().sync_bars(sym, days=730)
+
             bars = Bar.objects.filter(instrument=si.instrument).order_by("date")
             if bars.exists():
                 import pandas as pd
