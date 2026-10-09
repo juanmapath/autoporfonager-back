@@ -14,14 +14,19 @@ def fetch_historical_ohlcv(symbol: str, start_date: str, end_date: str) -> pd.Da
     """
     import yfinance as yf
 
+    sym = symbol.strip().upper()
     dt_start = pd.to_datetime(start_date)
-    dt_end = pd.to_datetime(end_date)
+    dt_end = pd.to_datetime(end_date) + pd.Timedelta(days=1)
     pad_start = (dt_start - pd.Timedelta(days=180)).strftime("%Y-%m-%d")
     end_str = dt_end.strftime("%Y-%m-%d")
 
-    df = yf.download(symbol, start=pad_start, end=end_str, progress=False, auto_adjust=True)
+    try:
+        df = yf.download(sym, start=pad_start, end=end_str, progress=False, auto_adjust=True)
+    except Exception as e:
+        raise ValueError(f"Error al descargar datos de Yahoo Finance para '{sym}': {str(e)}")
+
     if df is None or df.empty:
-        raise ValueError(f"No se pudieron descargar datos históricos para {symbol}")
+        raise ValueError(f"No se encontraron datos históricos para el ticker '{sym}'. Verifica que el símbolo exista en Yahoo Finance (ej. QQQ, SPY, NVDA, AAPL, BTC-USD).")
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -29,7 +34,7 @@ def fetch_historical_ohlcv(symbol: str, start_date: str, end_date: str) -> pd.Da
     cols_needed = ["Open", "High", "Low", "Close", "Volume"]
     for c in cols_needed:
         if c not in df.columns:
-            raise ValueError(f"Columna faltante '{c}' en datos de {symbol}")
+            raise ValueError(f"Columna faltante '{c}' en datos de {sym}")
 
     df = df[cols_needed].copy().ffill().bfill()
     df.index = pd.to_datetime(df.index)
@@ -40,7 +45,8 @@ class BacktestEngine:
     """
     Motor cuantitativo de backtesting profesional para bots de trading algorítmico.
     Garantiza 100% de paridad con las señales de producción y calcula métricas
-    financieras completas (ROI, CAGR, Max DD, Sharpe, Sortino, Win Rate, Profit Factor).
+    financieras completas (ROI, CAGR, Max DD, Sharpe, Sortino, Win Rate, Profit Factor,
+    Apalancamiento Dinámico Walk-Forward y atribución granular por sub-estrategia).
     """
 
     def __init__(self, initial_cash: float = 100000.0, commission_per_trade: float = 0.0, slippage_pct: float = 0.0005):
@@ -48,12 +54,31 @@ class BacktestEngine:
         self.commission = float(commission_per_trade)
         self.slippage = float(slippage_pct)
 
+    def run(self, df: pd.DataFrame, strategy_name: str, params: Any = None) -> Dict[str, Any]:
+        """Convenience method to run a simulation directly on an existing DataFrame."""
+        strat_func = STRATEGY_MAP.get(strategy_name)
+        if not strat_func:
+            raise ValueError(f"Estrategia '{strategy_name}' no encontrada en el catálogo.")
+        sig, _ = strat_func(df, params if params is not None else [])
+        state = pd.Series(0, index=sig.index)
+        curr = 0
+        for i in range(len(sig)):
+            v = sig.iloc[i]
+            if v == 1:
+                curr = 1
+            elif v == -1:
+                curr = 0
+            state.iloc[i] = curr
+        return self._simulate(df=df, signals=state, symbol="ASSET")
+
     def run_for_strategy(
         self,
         strategy,
         start_date: str,
         end_date: str,
-        leverage: float = 1.0,
+        leverage: Optional[float] = None,
+        max_leverage: Optional[float] = None,
+        use_dynamic_leverage: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Ejecuta el backtest histórico completo de un Bot (Strategy) de la base de datos.
@@ -75,34 +100,89 @@ class BacktestEngine:
 
         traded_sym = traded_inst.instrument.symbol
         signal_sym = signal_inst.instrument.symbol if signal_inst else traded_sym
+        raw_strats = params.get("strategies", [])
+        bot_type = params.get("bot_type") or strategy.kind or "one_strategy"
+
+        strat_base_lev = float(leverage if leverage is not None else params.get("leverage", 1.0))
+        strat_max_lev = float(max_leverage if max_leverage is not None else params.get("max_leverage", strat_base_lev))
+        strat_dyn = use_dynamic_leverage if use_dynamic_leverage is not None else params.get("use_regimes", False)
+
+        return self.run_for_config(
+            bot_type=bot_type,
+            traded_symbol=traded_sym,
+            signal_symbol=signal_sym,
+            strategies=raw_strats,
+            start_date=start_date,
+            end_date=end_date,
+            leverage=strat_base_lev,
+            max_leverage=strat_max_lev,
+            use_dynamic_leverage=strat_dyn,
+            strategy_params=params,
+        )
+
+    def run_for_config(
+        self,
+        bot_type: str,
+        traded_symbol: str,
+        signal_symbol: Optional[str] = None,
+        strategies: Optional[List[Dict[str, Any]]] = None,
+        start_date: str = "2023-01-01",
+        end_date: str = "2024-01-01",
+        leverage: float = 1.0,
+        max_leverage: float = 1.0,
+        use_dynamic_leverage: bool = False,
+        strategy_params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Ejecuta el backtest a partir de una configuración ad-hoc o personalizada.
+        Permite probar cualquier ticker, tipo de bot, combinación de estrategias y
+        apalancamiento dinámico (Walk-Forward Profit Factor).
+        """
+        traded_sym = str(traded_symbol).strip().upper()
+        if not traded_sym:
+            raise ValueError("Debes especificar un ticker para el activo negociado.")
+
+        signal_sym = str(signal_symbol).strip().upper() if signal_symbol else traded_sym
+        if not signal_sym:
+            signal_sym = traded_sym
 
         # 1. Ingesta de datos
         df_traded = fetch_historical_ohlcv(traded_sym, start_date, end_date)
         df_signal = fetch_historical_ohlcv(signal_sym, start_date, end_date) if signal_sym != traded_sym else df_traded
 
-        # 2. Generación de Señales según el motor
-        engine_type = strategy.engine
+        # 2. Generación de Señales y Atribución por Sub-Estrategia
         signals_series = pd.Series(0, index=df_traded.index)
+        strategies = strategies or []
+        strategy_params = strategy_params or {}
 
-        if engine_type == "multi_signal" or "strategies" in params:
-            # Multi-estrategia con unión OR y seguimiento continuo de estado
-            raw_strategies = params.get("strategies", [])
-            strategies_list = []
-            strategies_params = []
-            if raw_strategies and isinstance(raw_strategies[0], dict):
-                for item in raw_strategies:
-                    strategies_list.append(item.get("strategy_name"))
-                    strategies_params.append(item.get("params", []))
-            else:
-                strategies_list = raw_strategies
-                strategies_params = params.get("strategies_params", [])
+        entry_meta_by_date: Dict[str, List[str]] = {}
+        exit_meta_by_date: Dict[str, List[str]] = {}
 
+        if bot_type == "follow_price":
+            signals_series = pd.Series(1, index=df_traded.index)
+            for dt in df_traded.index:
+                d_str = str(dt.date()) if hasattr(dt, "date") else str(dt)
+                entry_meta_by_date[d_str] = ["Follow Price"]
+                exit_meta_by_date[d_str] = ["Follow Price"]
+
+        elif bot_type == "multi_strategy" or len(strategies) > 1:
             all_signals = []
-            for s_name, s_param in zip(strategies_list, strategies_params):
+            all_names = []
+            for item in strategies:
+                if isinstance(item, dict):
+                    s_name = item.get("strategy_name")
+                    s_param = item.get("params", [])
+                elif isinstance(item, str):
+                    s_name = item
+                    s_param = []
+                else:
+                    continue
+
                 strat_func = STRATEGY_MAP.get(s_name)
                 if strat_func:
                     sig, _ = strat_func(df_signal, s_param)
                     all_signals.append(sig)
+                    all_names.append(s_name)
 
             if all_signals:
                 active_states = []
@@ -125,68 +205,138 @@ class BacktestEngine:
                 signals_series = np.where(combined_long, 1, 0)
                 signals_series = pd.Series(signals_series, index=df_signal.index)
 
-        elif engine_type == "cross_asset":
-            s_name = params.get("strategy_name")
-            s_params = params.get("params", {})
-            strat_func = STRATEGY_MAP.get(s_name)
-            if not strat_func and "strategies" in params and params["strategies"]:
-                first_s = params["strategies"][0]
-                if isinstance(first_s, dict):
-                    s_name = first_s.get("strategy_name")
-                    s_params = first_s.get("params", s_params)
-                strat_func = STRATEGY_MAP.get(s_name)
+                # Atribución precisa: ¿qué estrategia disparó la entrada o salida en cada vela?
+                n_bars = len(df_signal)
+                for i in range(n_bars):
+                    dt_val = df_signal.index[i]
+                    d_str = str(dt_val.date()) if hasattr(dt_val, "date") else str(dt_val)
 
-            if strat_func:
-                sig, _ = strat_func(df_signal, s_params)
-                signals_series = sig
-            else:
-                raise ValueError(f"Función de estrategia '{s_name}' no encontrada en catálogo.")
+                    entry_strats = []
+                    exit_strats = []
+                    for idx_s, sig in enumerate(all_signals):
+                        # Señal de compra directa o cambio de estado
+                        if sig.iloc[i] == 1:
+                            entry_strats.append(all_names[idx_s])
+                        elif sig.iloc[i] == -1:
+                            exit_strats.append(all_names[idx_s])
 
-        else:
-            # Single Signal Engine
-            s_name = params.get("strategy_name") or params.get("strategy_function")
-            s_params = params.get("strategy_params", params.get("params", {}))
-            if not s_name and "strategies" in params and params["strategies"]:
-                first_s = params["strategies"][0]
-                if isinstance(first_s, dict):
-                    s_name = first_s.get("strategy_name")
-                    s_params = first_s.get("params", s_params)
-                elif isinstance(first_s, str):
-                    s_name = first_s
+                    if entry_strats:
+                        entry_meta_by_date[d_str] = entry_strats
+                    if exit_strats:
+                        exit_meta_by_date[d_str] = exit_strats
+
+        elif bot_type == "cross_asset":
+            s_name = None
+            s_param = {}
+            if strategies:
+                s_name = strategies[0].get("strategy_name")
+                s_param = strategies[0].get("params", {})
+            if not s_name:
+                s_name = strategy_params.get("strategy_name")
+                s_param = strategy_params.get("params", {})
 
             strat_func = STRATEGY_MAP.get(s_name)
             if not strat_func:
-                raise ValueError(f"Estrategia '{s_name}' no encontrada en catálogo.")
-            sig, _ = strat_func(df_signal, s_params)
-            signals_series = sig
+                raise ValueError(f"Estrategia '{s_name}' no encontrada en el catálogo.")
 
-        # Alinear fechas al rango solicitado (eliminando el padding inicial de calentamiento)
+            sig, _ = strat_func(df_signal, s_param)
+            # Convertir pulsos discretos (1, -1, 0) a estado continuo de posición (1: dentro, 0: fuera)
+            state = pd.Series(0, index=sig.index)
+            curr = 0
+            for i in range(len(sig)):
+                v = sig.iloc[i]
+                if v == 1:
+                    curr = 1
+                elif v == -1:
+                    curr = 0
+                state.iloc[i] = curr
+            signals_series = state
+
+            label = f"{s_name} ({signal_sym})"
+            for idx_i, dt in enumerate(df_traded.index):
+                d_str = str(dt.date()) if hasattr(dt, "date") else str(dt)
+                if sig.iloc[idx_i] == 1:
+                    entry_meta_by_date[d_str] = [label]
+                elif sig.iloc[idx_i] == -1:
+                    exit_meta_by_date[d_str] = [label]
+
+        else:
+            # Single Strategy (one_strategy)
+            s_name = None
+            s_param = {}
+            if strategies:
+                first = strategies[0]
+                if isinstance(first, dict):
+                    s_name = first.get("strategy_name")
+                    s_param = first.get("params", {})
+                elif isinstance(first, str):
+                    s_name = first
+            if not s_name:
+                s_name = strategy_params.get("strategy_name") or strategy_params.get("strategy_function")
+                s_param = strategy_params.get("strategy_params", strategy_params.get("params", {}))
+
+            if not s_name:
+                raise ValueError("No se especificó ninguna función de estrategia para evaluar.")
+
+            strat_func = STRATEGY_MAP.get(s_name)
+            if not strat_func:
+                raise ValueError(f"Estrategia '{s_name}' no encontrada en el catálogo.")
+
+            sig, _ = strat_func(df_signal, s_param)
+            # Convertir pulsos discretos (1, -1, 0) a estado continuo de posición (1: dentro, 0: fuera)
+            state = pd.Series(0, index=sig.index)
+            curr = 0
+            for i in range(len(sig)):
+                v = sig.iloc[i]
+                if v == 1:
+                    curr = 1
+                elif v == -1:
+                    curr = 0
+                state.iloc[i] = curr
+            signals_series = state
+
+            for idx_i, dt in enumerate(df_traded.index):
+                d_str = str(dt.date()) if hasattr(dt, "date") else str(dt)
+                if sig.iloc[idx_i] == 1:
+                    entry_meta_by_date[d_str] = [s_name]
+                elif sig.iloc[idx_i] == -1:
+                    exit_meta_by_date[d_str] = [s_name]
+
+        # Recortar al rango solicitado (eliminando el padding previo de calentamiento)
         dt_start_pd = pd.to_datetime(start_date)
         mask_range = df_traded.index >= dt_start_pd
         df_traded_eval = df_traded[mask_range].copy()
         signals_eval = signals_series.reindex(df_traded_eval.index).fillna(0)
 
-        # 3. Simulación de Ejecución
-        return self._simulate(df_traded_eval, signals_eval, traded_sym, leverage=leverage)
+        # 3. Simulación de Ejecución con Apalancamiento Dinámico y Atribución
+        return self._simulate(
+            df=df_traded_eval,
+            signals=signals_eval,
+            symbol=traded_sym,
+            base_leverage=float(leverage),
+            max_leverage=float(max_leverage if max_leverage >= leverage else leverage),
+            use_dynamic_leverage=bool(use_dynamic_leverage),
+            entry_meta_by_date=entry_meta_by_date,
+            exit_meta_by_date=exit_meta_by_date,
+        )
 
-    def run(self, df: pd.DataFrame, strategy_name: str, params: Any, leverage: float = 1.0) -> Dict[str, Any]:
-        """
-        Ejecuta backtest directamente sobre un DataFrame para una estrategia puntual del catálogo.
-        """
-        strat_func = STRATEGY_MAP.get(strategy_name)
-        if not strat_func:
-            raise ValueError(f"Strategy '{strategy_name}' not found in STRATEGY_MAP.")
-
-        signals, _ = strat_func(df, params)
-        return self._simulate(df, signals, symbol="ASSET", leverage=leverage)
-
-    def _simulate(self, df: pd.DataFrame, signals: pd.Series, symbol: str, leverage: float = 1.0) -> Dict[str, Any]:
+    def _simulate(
+        self,
+        df: pd.DataFrame,
+        signals: pd.Series,
+        symbol: str,
+        base_leverage: float = 1.0,
+        max_leverage: float = 1.0,
+        use_dynamic_leverage: bool = False,
+        entry_meta_by_date: Optional[Dict[str, List[str]]] = None,
+        exit_meta_by_date: Optional[Dict[str, List[str]]] = None,
+    ) -> Dict[str, Any]:
         closes = df["Close"].values
         dates = df.index
         n = len(closes)
 
         if n < 2:
-            raise ValueError("Datos insuficientes para ejecutar la simulación.")
+            raise ValueError("Datos insuficientes en el rango para ejecutar la simulación.")
 
         # --- Benchmark: Buy & Hold ---
         bh_first_price = float(closes[0])
@@ -200,22 +350,50 @@ class BacktestEngine:
         trades = []
         entry_price = 0.0
         entry_date = None
+        entry_strat_name = "Estrategia"
+        trade_leverage = base_leverage
         in_position = False
 
         for i in range(n):
             price = float(closes[i])
             sig = int(signals.iloc[i]) if pd.notnull(signals.iloc[i]) else 0
+            d_str = str(dates[i].date()) if hasattr(dates[i], "date") else str(dates[i])
 
             # Buy Signal (1)
             if sig == 1 and not in_position:
+                # 1. Determinar Apalancamiento Dinámico según Profit Factor Walk-Forward
+                if use_dynamic_leverage and len(trades) >= 2:
+                    gains = [t["pnl"] for t in trades if t["pnl"] > 0]
+                    losses = [abs(t["pnl"]) for t in trades if t["pnl"] <= 0]
+                    sum_gains = sum(gains)
+                    sum_losses = sum(losses)
+                    running_pf = sum_gains / sum_losses if sum_losses > 0 else (99.0 if sum_gains > 0 else 1.0)
+
+                    # Escalamiento adaptativo
+                    if running_pf >= 2.5:
+                        active_leverage = max_leverage
+                    elif running_pf >= 1.5:
+                        active_leverage = base_leverage + 0.5 * (max_leverage - base_leverage)
+                    else:
+                        active_leverage = base_leverage
+                else:
+                    active_leverage = base_leverage
+
+                active_leverage = max(1.0, float(active_leverage))
                 adj_price = price * (1.0 + self.slippage)
                 total_equity = cash
-                investable = (total_equity * leverage) - self.commission
+                investable = (total_equity * active_leverage) - self.commission
+
                 if investable > 0 and adj_price > 0:
                     shares = investable / adj_price
                     cash -= (shares * adj_price) + self.commission
                     entry_price = adj_price
-                    entry_date = str(dates[i].date()) if hasattr(dates[i], "date") else str(dates[i])
+                    entry_date = d_str
+                    trade_leverage = active_leverage
+
+                    # Atribución de inicio
+                    matched_entry = entry_meta_by_date.get(d_str) if entry_meta_by_date else None
+                    entry_strat_name = " + ".join(matched_entry) if matched_entry else "Estrategia"
                     in_position = True
 
             # Sell / Flat Signal (-1 or 0 when in_position)
@@ -225,7 +403,11 @@ class BacktestEngine:
                 cash += proceeds
                 pnl = proceeds - (shares * entry_price)
                 pnl_pct = ((adj_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0.0
-                exit_date = str(dates[i].date()) if hasattr(dates[i], "date") else str(dates[i])
+                exit_date = d_str
+
+                # Atribución de salida
+                matched_exit = exit_meta_by_date.get(d_str) if exit_meta_by_date else None
+                exit_strat_name = " + ".join(matched_exit) if matched_exit else "Regla de Salida"
 
                 trades.append({
                     "entry_date": entry_date,
@@ -235,6 +417,9 @@ class BacktestEngine:
                     "shares": round(shares, 4),
                     "pnl": round(pnl, 2),
                     "pnl_pct": round(pnl_pct, 2),
+                    "leverage": round(trade_leverage, 2),
+                    "entry_strategy": entry_strat_name,
+                    "exit_strategy": exit_strat_name,
                 })
 
                 shares = 0.0
@@ -251,14 +436,18 @@ class BacktestEngine:
             last_price = float(closes[-1])
             unrealized_pnl = (shares * last_price) - (shares * entry_price)
             unrealized_pct = ((last_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0.0
+            last_date_str = str(dates[-1].date()) if hasattr(dates[-1], "date") else str(dates[-1])
             trades.append({
                 "entry_date": entry_date,
-                "exit_date": str(dates[-1].date()) if hasattr(dates[-1], "date") else str(dates[-1]),
+                "exit_date": last_date_str,
                 "entry_price": round(entry_price, 2),
                 "exit_price": round(last_price, 2),
                 "shares": round(shares, 4),
                 "pnl": round(unrealized_pnl, 2),
                 "pnl_pct": round(unrealized_pct, 2),
+                "leverage": round(trade_leverage, 2),
+                "entry_strategy": entry_strat_name,
+                "exit_strategy": "En Posición (Abierto)",
                 "open": True,
             })
 
@@ -303,8 +492,8 @@ class BacktestEngine:
         total_loss = abs(sum(t["pnl"] for t in losses))
         profit_factor = round(total_gain / total_loss, 2) if total_loss > 0 else (99.0 if total_gain > 0 else 0.0)
 
-        # Equity Curve Samples (~150 puntos para graficación rápida)
-        step = max(1, len(pv_series) // 150)
+        # Equity Curve Samples (~160 puntos para graficación rápida)
+        step = max(1, len(pv_series) // 160)
         curve = []
         for i in range(0, len(pv_series), step):
             dt_str = str(dates[i].date()) if hasattr(dates[i], "date") else str(dates[i])
@@ -322,6 +511,27 @@ class BacktestEngine:
                 "strategy_value": round(final_val, 2),
                 "benchmark_value": round(bh_final_val, 2),
             })
+
+        # Construir marcadores visuales para la gráfica
+        trade_markers = []
+        for t in trades:
+            trade_markers.append({
+                "date": t["entry_date"],
+                "type": "BUY",
+                "price": t["entry_price"],
+                "strategy": t.get("entry_strategy", "Estrategia"),
+                "leverage": t.get("leverage", 1.0),
+            })
+            if not t.get("open"):
+                trade_markers.append({
+                    "date": t["exit_date"],
+                    "type": "SELL",
+                    "price": t["exit_price"],
+                    "strategy": t.get("exit_strategy", "Salida"),
+                    "pnl": t["pnl"],
+                    "pnl_pct": t["pnl_pct"],
+                    "is_win": t["pnl"] > 0,
+                })
 
         return {
             "symbol": symbol,
@@ -342,4 +552,10 @@ class BacktestEngine:
             "alpha_vs_benchmark": round(total_roi - bh_roi, 2),
             "equity_curve": curve,
             "trades": trades,
+            "trade_markers": trade_markers,
+            "applied_leverage": {
+                "base_leverage": base_leverage,
+                "max_leverage": max_leverage,
+                "use_dynamic_leverage": use_dynamic_leverage,
+            },
         }

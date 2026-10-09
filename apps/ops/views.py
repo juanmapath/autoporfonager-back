@@ -157,33 +157,41 @@ class OpsBacktestView(APIView):
     def post(self, request):
         strategy_id = request.data.get("strategy_id")
         strat_slug = request.data.get("strategy_slug")
+        bot_type = request.data.get("bot_type")
+        traded_symbol = request.data.get("traded_symbol")
+        signal_symbol = request.data.get("signal_symbol")
+        strategies_config = request.data.get("strategies")
+
         strat = None
         if strategy_id:
             strat = Strategy.objects.filter(id=strategy_id).first()
         elif strat_slug:
             strat = Strategy.objects.filter(slug=strat_slug).first()
 
-        if not strat:
-            strat = Strategy.objects.filter(is_active=True).first() or Strategy.objects.first()
-
-        if not strat:
-            return Response({"error": "No hay estrategias configuradas en la base de datos."}, status=status.HTTP_400_BAD_REQUEST)
-
         today_str = timezone.now().strftime("%Y-%m-%d")
         default_start = (timezone.now() - pd.Timedelta(days=730)).strftime("%Y-%m-%d")
         start_date = str(request.data.get("start_date") or default_start)
         end_date = str(request.data.get("end_date") or today_str)
         initial_capital = float(request.data.get("initial_capital", 100000.0))
-        leverage = float(request.data.get("leverage", 1.0))
+        base_leverage = float(request.data.get("leverage") or request.data.get("base_leverage") or 1.0)
+        max_leverage = float(request.data.get("max_leverage") or base_leverage)
+        use_dynamic_leverage = bool(request.data.get("use_dynamic_leverage", request.data.get("use_regimes", False)))
 
-        v = strat.versions.filter(status="live").first() or strat.versions.order_by("-version").first()
-        traded_inst = v.instruments.filter(role="traded").first() if v else None
-        traded_sym = traded_inst.instrument.symbol if traded_inst else "QQQ"
+        v = (strat.versions.filter(status="live").first() or strat.versions.order_by("-version").first()) if strat else None
+
+        effective_traded_sym = (traded_symbol or "").strip().upper()
+        if not effective_traded_sym and v:
+            traded_inst = v.instruments.filter(role="traded").first()
+            effective_traded_sym = traded_inst.instrument.symbol if traded_inst else "QQQ"
+        if not effective_traded_sym:
+            effective_traded_sym = "QQQ"
+
+        slug_label = strat.slug if strat else f"adhoc-{effective_traded_sym.lower()}"
 
         run = BacktestRun.objects.create(
             version=v,
-            strategy_slug=strat.slug,
-            instruments=[traded_sym],
+            strategy_slug=slug_label,
+            instruments=[effective_traded_sym],
             start_date=start_date,
             end_date=end_date,
             initial_capital=Decimal(str(initial_capital)),
@@ -192,7 +200,28 @@ class OpsBacktestView(APIView):
 
         try:
             engine = BacktestEngine(initial_cash=initial_capital)
-            res = engine.run_for_strategy(strat, start_date=start_date, end_date=end_date, leverage=leverage)
+
+            if strategies_config or traded_symbol or not strat:
+                res = engine.run_for_config(
+                    bot_type=bot_type or (strat.kind if strat else "one_strategy"),
+                    traded_symbol=effective_traded_sym,
+                    signal_symbol=signal_symbol,
+                    strategies=strategies_config or [],
+                    start_date=start_date,
+                    end_date=end_date,
+                    leverage=base_leverage,
+                    max_leverage=max_leverage,
+                    use_dynamic_leverage=use_dynamic_leverage,
+                )
+            else:
+                res = engine.run_for_strategy(
+                    strat,
+                    start_date=start_date,
+                    end_date=end_date,
+                    leverage=base_leverage,
+                    max_leverage=max_leverage,
+                    use_dynamic_leverage=use_dynamic_leverage,
+                )
 
             run.status = "done"
             run.metrics = {
@@ -211,13 +240,17 @@ class OpsBacktestView(APIView):
                 "benchmark_max_drawdown_pct": res["benchmark_max_drawdown_pct"],
                 "alpha_vs_benchmark": res["alpha_vs_benchmark"],
                 "trades": res.get("trades", []),
+                "trade_markers": res.get("trade_markers", []),
+                "applied_leverage": res.get("applied_leverage", {}),
             }
             run.equity_curve = res["equity_curve"]
             run.save()
 
             data = BacktestRunSerializer(run).data
             data["trades"] = res.get("trades", [])
-            data["symbol"] = res.get("symbol", traded_sym)
+            data["trade_markers"] = res.get("trade_markers", [])
+            data["applied_leverage"] = res.get("applied_leverage", {})
+            data["symbol"] = res.get("symbol", effective_traded_sym)
             return Response(data, status=status.HTTP_201_CREATED)
         except Exception as e:
             run.status = "failed"

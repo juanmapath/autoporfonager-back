@@ -510,20 +510,39 @@ def kvo_bull_spt(data_df, params):
     volume = data_df['Volume'] if 'Volume' in data_df.columns else pd.Series(1, index=close.index)
 
     if isinstance(params, dict):
-        kvo_params = params.get('kvo', [7, 28])
+        fastT = int(params.get('short_period', params.get('fast', 7)))
+        slowT = int(params.get('long_period', params.get('slow', 28)))
+        st_lookback = int(params.get('st_lookback', 28))
+        st_mult = float(params.get('st_mult', 3.5))
         ema_span = int(params.get('ema', 200))
         cooldown = int(params.get('cooldown', 12))
+        if 'kvo' in params and isinstance(params['kvo'], (list, tuple)):
+            k = params['kvo']
+            fastT = int(k[0]) if len(k) > 0 else fastT
+            slowT = int(k[1]) if len(k) > 1 else slowT
     elif isinstance(params, (list, tuple)):
-        kvo_params = params[0] if len(params) > 0 else [7, 28]
-        ema_span = int(params[1]) if len(params) > 1 else 200
-        cooldown = int(params[2]) if len(params) > 2 else 12
+        if len(params) > 0 and isinstance(params[0], (list, tuple)):
+            k = params[0]
+            fastT = int(k[0]) if len(k) > 0 else 7
+            slowT = int(k[1]) if len(k) > 1 else 28
+            ema_span = int(params[1]) if len(params) > 1 else 200
+            cooldown = int(params[2]) if len(params) > 2 else 12
+            st_lookback, st_mult = 28, 3.5
+        elif len(params) >= 4:
+            fastT = int(params[0])
+            slowT = int(params[1])
+            st_lookback = int(params[2])
+            st_mult = float(params[3])
+            ema_span = 200
+            cooldown = 12
+        elif len(params) >= 2:
+            fastT = int(params[0])
+            slowT = int(params[1])
+            st_lookback, st_mult, ema_span, cooldown = 28, 3.5, 200, 12
+        else:
+            fastT, slowT, ema_span, cooldown, st_lookback, st_mult = 7, 28, 200, 12, 28, 3.5
     else:
-        kvo_params = [7, 28]
-        ema_span = 200
-        cooldown = 12
-
-    fastT = int(kvo_params[0]) if isinstance(kvo_params, (list, tuple)) else 7
-    slowT = int(kvo_params[1]) if isinstance(kvo_params, (list, tuple)) else 28
+        fastT, slowT, ema_span, cooldown, st_lookback, st_mult = 7, 28, 200, 12, 28, 3.5
 
     # Indicador KVO
     hlc3 = (high + low + close) / 3
@@ -537,7 +556,7 @@ def kvo_bull_spt(data_df, params):
     ema_main = close.ewm(span=ema_span, adjust=False).mean()
 
     # Supertrend
-    st_df = calculate_supertrend(data_df, lookback=28, multiplier=3.5)
+    st_df = calculate_supertrend(data_df, lookback=st_lookback, multiplier=st_mult)
     supertrend_val = st_df['supertrend']
     sup_bul_bear = np.where(supertrend_val > close, -1, 1)
     sp_change = pd.Series(sup_bul_bear, index=close.index) != pd.Series(sup_bul_bear, index=close.index).shift(1)
@@ -579,18 +598,34 @@ def macd_slope(data_df, params):
     close = data_df['Close']
 
     if isinstance(params, dict):
-        macd_inputs = params.get('macd', [12, 26, 9])
+        fast_period = int(params.get('fast', 12))
+        slow_period = int(params.get('slow', 26))
+        signal_period = int(params.get('signal', 9))
         ema_span = int(params.get('ema', 200))
+        if 'macd' in params and isinstance(params['macd'], (list, tuple)):
+            m = params['macd']
+            fast_period = int(m[0]) if len(m) > 0 else fast_period
+            slow_period = int(m[1]) if len(m) > 1 else slow_period
+            signal_period = int(m[2]) if len(m) > 2 else signal_period
     elif isinstance(params, (list, tuple)):
-        macd_inputs = params[0] if len(params) > 0 else [12, 26, 9]
-        ema_span = int(params[1]) if len(params) > 1 else 200
+        if len(params) > 0 and isinstance(params[0], (list, tuple)):
+            m = params[0]
+            fast_period = int(m[0]) if len(m) > 0 else 12
+            slow_period = int(m[1]) if len(m) > 1 else 26
+            signal_period = int(m[2]) if len(m) > 2 else 9
+            ema_span = int(params[1]) if len(params) > 1 else 200
+        elif len(params) >= 4:
+            fast_period = int(params[0])
+            slow_period = int(params[1])
+            signal_period = int(params[2])
+            ema_span = int(params[3])
+        elif len(params) == 2:
+            fast_period, slow_period, signal_period = 12, 26, 9
+            ema_span = int(params[1])
+        else:
+            fast_period, slow_period, signal_period, ema_span = 12, 26, 9, 200
     else:
-        macd_inputs = [12, 26, 9]
-        ema_span = 200
-
-    fast_period = int(macd_inputs[0]) if isinstance(macd_inputs, (list, tuple)) else 12
-    slow_period = int(macd_inputs[1]) if isinstance(macd_inputs, (list, tuple)) else 26
-    signal_period = int(macd_inputs[2]) if isinstance(macd_inputs, (list, tuple)) else 9
+        fast_period, slow_period, signal_period, ema_span = 12, 26, 9, 200
 
     ema_fast = close.ewm(span=fast_period, adjust=False).mean()
     ema_slow = close.ewm(span=slow_period, adjust=False).mean()
@@ -629,21 +664,38 @@ def macd_slope_spt(data_df, params):
     close = data_df['Close']
 
     if isinstance(params, dict):
-        macd_inputs = params.get('macd', [12, 26, 9])
+        fast_period = int(params.get('fast', 12))
+        slow_period = int(params.get('slow', 26))
+        signal_period = int(params.get('signal', 9))
         ema_span = int(params.get('ema', 200))
         cooldown = int(params.get('cooldown', 21))
+        if 'macd' in params and isinstance(params['macd'], (list, tuple)):
+            m = params['macd']
+            fast_period = int(m[0]) if len(m) > 0 else fast_period
+            slow_period = int(m[1]) if len(m) > 1 else slow_period
+            signal_period = int(m[2]) if len(m) > 2 else signal_period
     elif isinstance(params, (list, tuple)):
-        macd_inputs = params[0] if len(params) > 0 else [12, 26, 9]
-        ema_span = int(params[1]) if len(params) > 1 else 200
-        cooldown = int(params[2]) if len(params) > 2 else 21
+        if len(params) > 0 and isinstance(params[0], (list, tuple)):
+            m = params[0]
+            fast_period = int(m[0]) if len(m) > 0 else 12
+            slow_period = int(m[1]) if len(m) > 1 else 26
+            signal_period = int(m[2]) if len(m) > 2 else 9
+            ema_span = int(params[1]) if len(params) > 1 else 200
+            cooldown = int(params[2]) if len(params) > 2 else 21
+        elif len(params) >= 4:
+            fast_period = int(params[0])
+            slow_period = int(params[1])
+            signal_period = int(params[2])
+            ema_span = int(params[3])
+            cooldown = int(params[4]) if len(params) > 4 else 21
+        elif len(params) == 2:
+            fast_period, slow_period, signal_period = 12, 26, 9
+            ema_span = int(params[1])
+            cooldown = 21
+        else:
+            fast_period, slow_period, signal_period, ema_span, cooldown = 12, 26, 9, 200, 21
     else:
-        macd_inputs = [12, 26, 9]
-        ema_span = 200
-        cooldown = 21
-
-    fast_period = int(macd_inputs[0]) if isinstance(macd_inputs, (list, tuple)) else 12
-    slow_period = int(macd_inputs[1]) if isinstance(macd_inputs, (list, tuple)) else 26
-    signal_period = int(macd_inputs[2]) if isinstance(macd_inputs, (list, tuple)) else 9
+        fast_period, slow_period, signal_period, ema_span, cooldown = 12, 26, 9, 200, 21
 
     ema_fast = close.ewm(span=fast_period, adjust=False).mean()
     ema_slow = close.ewm(span=slow_period, adjust=False).mean()
@@ -766,21 +818,34 @@ def buy_weakness(data_df, params):
     low = data_df['Low']
 
     if isinstance(params, dict):
-        macd_inputs = params.get('macd', [12, 26, 9])
-        weak_in = float(params.get('weak_in', 5))
+        fast_period = int(params.get('fast', 12))
+        slow_period = int(params.get('slow', 26))
+        signal_period = int(params.get('signal', 9))
+        weak_in = float(params.get('weak_in', 5.0))
         wr_period = int(params.get('wr', 14))
+        if 'macd' in params and isinstance(params['macd'], (list, tuple)):
+            m = params['macd']
+            fast_period = int(m[0]) if len(m) > 0 else fast_period
+            slow_period = int(m[1]) if len(m) > 1 else slow_period
+            signal_period = int(m[2]) if len(m) > 2 else signal_period
     elif isinstance(params, (list, tuple)):
-        macd_inputs = params[0] if len(params) > 0 else [12, 26, 9]
-        weak_in = float(params[1]) if len(params) > 1 else 5.0
-        wr_period = int(params[2]) if len(params) > 2 else 14
+        if len(params) > 0 and isinstance(params[0], (list, tuple)):
+            m = params[0]
+            fast_period = int(m[0]) if len(m) > 0 else 12
+            slow_period = int(m[1]) if len(m) > 1 else 26
+            signal_period = int(m[2]) if len(m) > 2 else 9
+            weak_in = float(params[1]) if len(params) > 1 else 5.0
+            wr_period = int(params[2]) if len(params) > 2 else 14
+        elif len(params) >= 5:
+            fast_period = int(params[0])
+            slow_period = int(params[1])
+            signal_period = int(params[2])
+            weak_in = float(params[3])
+            wr_period = int(params[4])
+        else:
+            fast_period, slow_period, signal_period, weak_in, wr_period = 12, 26, 9, 5.0, 14
     else:
-        macd_inputs = [12, 26, 9]
-        weak_in = 5.0
-        wr_period = 14
-
-    fast_period = int(macd_inputs[0]) if isinstance(macd_inputs, (list, tuple)) else 12
-    slow_period = int(macd_inputs[1]) if isinstance(macd_inputs, (list, tuple)) else 26
-    signal_period = int(macd_inputs[2]) if isinstance(macd_inputs, (list, tuple)) else 9
+        fast_period, slow_period, signal_period, weak_in, wr_period = 12, 26, 9, 5.0, 14
 
     # DEMA 5
     e1 = close.ewm(span=5, adjust=False).mean()
@@ -839,6 +904,106 @@ def buy_weakness(data_df, params):
     entry_cond = (score_sum == weak_in) & (score_sum.shift(1) > weak_in)
     exit_cond = close > high.shift(1)
     valid_mask = dema5.notnull() & ema200.notnull() & macd_line.notnull() & wr_indicator.notnull()
+
+    entry_conditions = {'meanreversion': entry_cond}
+    exit_conditions = {'meanreversion': exit_cond}
+
+    final_signals, signal_type = generate_signals_multi_state(entry_conditions, exit_conditions, valid_mask)
+
+    return final_signals, pd.DataFrame({'ScoreSum': score_sum, 'SignalType': signal_type}, index=close.index)
+
+
+def buy_weakness_x(data_df, params):
+    """
+    Estrategia de Reversión a la Media basada en Buy Weakness X (MACD + RSI Score escalonado).
+    data_df: DataFrame con OHLCV
+    Params: macd ([fast, slow, signal]), weak_in (o lista plana [fast, slow, signal, weak_in] o dict)
+    """
+    close = data_df['Close']
+    high = data_df['High']
+    low = data_df['Low']
+
+    if isinstance(params, dict):
+        fast_period = int(params.get('fast', 12))
+        slow_period = int(params.get('slow', 26))
+        signal_period = int(params.get('signal', 9))
+        weak_in = float(params.get('weak_in', -3.0))
+        if 'macd' in params and isinstance(params['macd'], (list, tuple)):
+            m = params['macd']
+            fast_period = int(m[0]) if len(m) > 0 else fast_period
+            slow_period = int(m[1]) if len(m) > 1 else slow_period
+            signal_period = int(m[2]) if len(m) > 2 else signal_period
+    elif isinstance(params, (list, tuple)):
+        if len(params) > 0 and isinstance(params[0], (list, tuple)):
+            m = params[0]
+            fast_period = int(m[0]) if len(m) > 0 else 12
+            slow_period = int(m[1]) if len(m) > 1 else 26
+            signal_period = int(m[2]) if len(m) > 2 else 9
+            weak_in = float(params[1]) if len(params) > 1 else -3.0
+        elif len(params) >= 4:
+            fast_period = int(params[0])
+            slow_period = int(params[1])
+            signal_period = int(params[2])
+            weak_in = float(params[3])
+        elif len(params) == 2:
+            fast_period, slow_period, signal_period = 12, 26, 9
+            weak_in = float(params[1])
+        else:
+            fast_period, slow_period, signal_period, weak_in = 12, 26, 9, -3.0
+    else:
+        fast_period, slow_period, signal_period, weak_in = 12, 26, 9, -3.0
+
+    # DEMA 5
+    e1 = close.ewm(span=5, adjust=False).mean()
+    e2 = e1.ewm(span=5, adjust=False).mean()
+    dema5 = 2 * e1 - e2
+
+    # EMA 50
+    ema50 = close.ewm(span=50, adjust=False).mean()
+
+    # MACD
+    ema_fast = close.ewm(span=fast_period, adjust=False).mean()
+    ema_slow = close.ewm(span=slow_period, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
+    macd_hist = macd_line - signal_line
+
+    # Pendientes móviles (ventana de 3)
+    macd_slope = (macd_line - macd_line.shift(2)) / 2
+    hist_slope = (macd_hist - macd_hist.shift(2)) / 2
+
+    # Supertrend
+    st_df = calculate_supertrend(data_df, lookback=fast_period, multiplier=2.0)
+    supertrend_val = st_df['supertrend']
+
+    # RSI (14)
+    delta = close.diff()
+    gain = (delta.where(delta > 0, 0.0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0.0)).rolling(window=14).mean()
+    rs = gain / loss
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+
+    # Scoring escalonado idéntico a BotOps
+    c_ema50 = np.where(dema5 > ema50, 1, -1)
+    c_macdline = np.where(macd_line > 0, 1, -1)
+    c_macdgap = np.where(macd_line > signal_line, 1, -1)
+    c_macdslope = np.where(macd_slope > 0, 1, -1)
+    c_macdsbarras = np.where(hist_slope > 0, 1, -1)
+    c_supert = np.where(close > supertrend_val, 1, -1)
+
+    c_rsi = np.where(rsi > 75, 2, 0)
+    c_rsi = np.where((rsi > 65) & (rsi <= 75), 1, c_rsi)
+    c_rsi = np.where((rsi < 35) & (rsi >= 25), -1, c_rsi)
+    c_rsi = np.where(rsi < 25, -2, c_rsi)
+
+    score_sum = pd.Series(
+        c_ema50 + c_macdline + c_macdgap + c_macdslope + c_macdsbarras + c_supert + c_rsi,
+        index=close.index
+    )
+
+    entry_cond = (score_sum <= weak_in) & (score_sum.shift(1) > score_sum)
+    exit_cond = close > high.shift(1)
+    valid_mask = dema5.notnull() & ema50.notnull() & macd_line.notnull() & rsi.notnull()
 
     entry_conditions = {'meanreversion': entry_cond}
     exit_conditions = {'meanreversion': exit_cond}
@@ -923,21 +1088,21 @@ def zs_cross_dema_combox2(data_df, params):
     
     # Parámetros (soporta dict o list/tuple de la UI)
     if isinstance(params, dict):
-        w_rapid = int(params.get('window_rapid', 14))
-        w_slow = int(params.get('window_slow', 90))
+        w_rapid = int(params.get('dema1', params.get('window_rapid', 14)))
+        w_slow = int(params.get('dema2', params.get('window_slow', 90)))
         z_period = int(params.get('zscore_period', 112))
-        zd_period = int(params.get('zdema_period', 28))
-        rsi_p = int(params.get('rsi_period', 3))
-        rsi_low = float(params.get('rsi_lower', 30))
+        zd_period = int(params.get('smaz', params.get('zdema_period', 28)))
+        rsi_p = int(params.get('rsi', params.get('rsi_period', 3)))
+        rsi_low = float(params.get('rsi_in', params.get('rsi_lower', 30.0)))
     elif isinstance(params, (list, tuple)):
         w_rapid = int(params[0]) if len(params) > 0 else 14
         w_slow = int(params[1]) if len(params) > 1 else 90
         z_period = int(params[2]) if len(params) > 2 else 112
         zd_period = int(params[3]) if len(params) > 3 else 28
         rsi_p = int(params[4]) if len(params) > 4 else 3
-        rsi_low = float(params[5]) if len(params) > 5 else 30
+        rsi_low = float(params[5]) if len(params) > 5 else 30.0
     else:
-        w_rapid, w_slow, z_period, zd_period, rsi_p, rsi_low = 14, 90, 112, 28, 3, 30
+        w_rapid, w_slow, z_period, zd_period, rsi_p, rsi_low = 14, 90, 112, 28, 3, 30.0
 
 
     # 1. DEMA Rapid/Slow (adjust=True coincide exactamente con test_model_4.py)
@@ -973,9 +1138,6 @@ def zs_cross_dema_combox2(data_df, params):
     cond1 = ((d_rapid > d_slow) & (zdema > 1)) | ((d_rapid > d_slow) & (zdema < 1) & (zdema_slope > 0))
     cond2 = (~cond1) & (rsi < rsi_low)
 
-    # Condición de salida de reversión a la media (Close > High.shift(1))
-    exit_mr = close > high.shift(1)
-
     entry_conditions = {
         'trendfollowing': cond1,
         'meanreversion': cond2
@@ -983,7 +1145,7 @@ def zs_cross_dema_combox2(data_df, params):
 
     exit_conditions = {
         'trendfollowing': ~cond1,
-        'meanreversion': exit_mr
+        'meanreversion': ~cond2
     }
 
     # En el período inicial de calentamiento de indicadores (NaNs), mantener sin posición (0)
@@ -1006,17 +1168,27 @@ def kvo_bull(data_df, params):
     volume = data_df['Volume'] if 'Volume' in data_df.columns else pd.Series(1, index=close.index)
 
     if isinstance(params, dict):
-        kvo_params = params.get('kvo', [params.get('short_period', 34), params.get('long_period', 55)])
+        fastT = int(params.get('short_period', params.get('fast', 34)))
+        slowT = int(params.get('long_period', params.get('slow', 55)))
         ema_span = int(params.get('ema', params.get('signal_period', 200)))
+        if 'kvo' in params and isinstance(params['kvo'], (list, tuple)):
+            k = params['kvo']
+            fastT = int(k[0]) if len(k) > 0 else fastT
+            slowT = int(k[1]) if len(k) > 1 else slowT
     elif isinstance(params, (list, tuple)):
-        kvo_params = params[0] if len(params) > 0 else [34, 55]
-        ema_span = int(params[1]) if len(params) > 1 else 200
+        if len(params) > 0 and isinstance(params[0], (list, tuple)):
+            k = params[0]
+            fastT = int(k[0]) if len(k) > 0 else 34
+            slowT = int(k[1]) if len(k) > 1 else 55
+            ema_span = int(params[1]) if len(params) > 1 else 200
+        elif len(params) >= 3:
+            fastT = int(params[0])
+            slowT = int(params[1])
+            ema_span = int(params[2])
+        else:
+            fastT, slowT, ema_span = 34, 55, 200
     else:
-        kvo_params = [34, 55]
-        ema_span = 200
-
-    fastT = int(kvo_params[0]) if isinstance(kvo_params, (list, tuple)) else 34
-    slowT = int(kvo_params[1]) if isinstance(kvo_params, (list, tuple)) else 55
+        fastT, slowT, ema_span = 34, 55, 200
 
     hlc3 = (high + low + close) / 3
     kvo_trend = np.where(hlc3 > hlc3.shift(1), volume * 100, -volume * 100)
@@ -1128,6 +1300,8 @@ STRATEGY_MAP = {
     'trend_pull_back_rsi': trend_pull_back_rsi,
     'MeanRev_BuyWeakness': buy_weakness,
     'buy_weakness': buy_weakness,
+    'MeanRev_BuyWeaknessX': buy_weakness_x,
+    'buy_weakness_x': buy_weakness_x,
     'MeanRev_RegresRSIS': regression_rsi_short,
     'regression_rsi_short': regression_rsi_short,
     'MeanRev_LowestLow': lowest_low,
