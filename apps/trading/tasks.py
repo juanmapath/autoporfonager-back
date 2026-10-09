@@ -247,8 +247,8 @@ def reconcile_broker_fills():
             continue
 
         creds = account.credential.get_secrets()
-        api_key = creds.get("key_id")
-        api_secret = creds.get("secret")
+        api_key = creds.get("key_id") or creds.get("api_key")
+        api_secret = creds.get("secret_key") or creds.get("secret")
         is_paper = account.environment == "paper"
 
         if not api_key or not api_secret:

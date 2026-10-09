@@ -67,14 +67,20 @@ class PortfolioViewSet(viewsets.ModelViewSet):
         if total_weight > Decimal("1.0001"):
             return Response({"error": f"Total weight cannot exceed 100% (got {total_weight * 100}%)"}, status=400)
 
+        active_broker = portfolio.broker_accounts.filter(trading_enabled=True).first()
         saved = []
         for item in alloc_data:
             strat_id = item.get("strategy")
             target_weight = Decimal(str(item.get("target_weight", 0)))
+            broker_acc_id = item.get("broker_account") or (active_broker.id if active_broker else None)
             alloc, created = Allocation.objects.update_or_create(
                 portfolio=portfolio,
                 strategy_id=strat_id,
-                defaults={"target_weight": target_weight, "enabled": target_weight > 0}
+                defaults={
+                    "target_weight": target_weight,
+                    "enabled": target_weight > 0,
+                    "broker_account_id": broker_acc_id,
+                }
             )
             saved.append(alloc)
 

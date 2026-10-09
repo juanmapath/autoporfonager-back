@@ -71,8 +71,8 @@ class OrderDispatcher:
         try:
             # Connect via alpaca-py TradingClient
             creds = intent.broker_account.credential.get_secrets() if intent.broker_account.credential else {}
-            api_key = creds.get("key_id")
-            api_secret = creds.get("secret")
+            api_key = creds.get("key_id") or creds.get("api_key")
+            api_secret = creds.get("secret_key") or creds.get("secret")
             is_paper = intent.broker_account.environment == "paper"
 
             if api_key and api_secret:

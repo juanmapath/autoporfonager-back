@@ -59,12 +59,15 @@ class PortfolioAllocator:
                 target_shares = target_value / price if price > 0 else Decimal("0.0")
                 target_shares = quantize_qty(target_shares, round_down=True)
 
+                # Fallback to portfolio's active broker account if allocation doesn't specify one
+                broker_acc = alloc.broker_account or portfolio.broker_accounts.filter(trading_enabled=True).first()
+
                 # Current position
                 log_pos = LogicalPosition.objects.filter(
                     portfolio=portfolio,
                     strategy=strategy,
                     instrument=inst,
-                    broker_account=alloc.broker_account,
+                    broker_account=broker_acc,
                 ).first()
                 curr_shares = log_pos.qty if log_pos else Decimal("0.0")
 
@@ -75,7 +78,7 @@ class PortfolioAllocator:
                     run=self.run,
                     strategy=strategy,
                     instrument=inst,
-                    broker_account=alloc.broker_account,
+                    broker_account=broker_acc,
                     sleeve_capital=sleeve_capital,
                     target_qty=target_shares,
                     current_qty=curr_shares,
@@ -85,9 +88,10 @@ class PortfolioAllocator:
                 targets_created.append(t)
 
                 # Add to netting
-                key = (alloc.broker_account_id, inst.id)
+                ba_id = broker_acc.id if broker_acc else None
+                key = (ba_id, inst.id)
                 netting_map[key] = netting_map.get(key, Decimal("0.0")) + delta
-                intent_inst_map[key] = (alloc.broker_account, inst)
+                intent_inst_map[key] = (broker_acc, inst)
 
         # Generate netted OrderIntents
         intents = []

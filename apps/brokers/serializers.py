@@ -120,4 +120,7 @@ class BrokerAccountCreateSerializer(serializers.Serializer):
             portfolio.paper_initial_capital = portfolio_value
             portfolio.save(update_fields=["paper_initial_capital"])
 
+        # Auto-assign broker account to any allocations in this portfolio without one
+        portfolio.allocations.filter(broker_account__isnull=True).update(broker_account=account)
+
         return account

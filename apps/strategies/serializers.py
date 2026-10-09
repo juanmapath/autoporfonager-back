@@ -21,6 +21,7 @@ class StrategyVersionSerializer(serializers.ModelSerializer):
 class StrategySerializer(serializers.ModelSerializer):
     versions = StrategyVersionSerializer(many=True, read_only=True)
     live_version = serializers.SerializerMethodField()
+    current_signals = serializers.SerializerMethodField()
 
     class Meta:
         model = Strategy
@@ -28,11 +29,33 @@ class StrategySerializer(serializers.ModelSerializer):
             "id", "slug", "name", "family", "kind", "engine",
             "timeframe", "decision_offset_minutes",
             "is_active", "signal_only", "versions", "live_version",
+            "current_signals",
         ]
 
     def get_live_version(self, obj):
         v = obj.versions.filter(status="live").first()
         return StrategyVersionSerializer(v).data if v else None
+
+    def get_current_signals(self, obj):
+        from apps.strategies.models import Signal
+        v = obj.versions.filter(status="live").first()
+        if not v:
+            return []
+        signals = []
+        for inst in v.instruments.all().select_related("instrument"):
+            sig = Signal.objects.filter(version=v, instrument=inst.instrument).order_by("-as_of").first()
+            if sig:
+                exp = float(sig.target_exposure)
+                direction = "LONG" if exp > 0 else ("SHORT" if exp < 0 else "FLAT")
+                signals.append({
+                    "symbol": inst.instrument.symbol,
+                    "target_exposure": exp,
+                    "direction": direction,
+                    "as_of": sig.as_of,
+                    "changed": sig.changed,
+                    "diagnostics": sig.diagnostics,
+                })
+        return signals
 
 
 class StrategyConfigItemSerializer(serializers.Serializer):
