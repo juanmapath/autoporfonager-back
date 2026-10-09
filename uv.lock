@@ -113,6 +113,7 @@ dependencies = [
     { name = "statsmodels" },
     { name = "structlog" },
     { name = "whitenoise" },
+    { name = "yfinance" },
 ]
 
 [package.optional-dependencies]
@@ -122,7 +123,6 @@ dev = [
     { name = "pytest-django" },
     { name = "responses" },
     { name = "time-machine" },
-    { name = "yfinance" },
 ]
 
 [package.metadata]
@@ -156,7 +156,7 @@ requires-dist = [
     { name = "structlog", specifier = ">=24.1.0" },
     { name = "time-machine", marker = "extra == 'dev'", specifier = ">=2.14.0" },
     { name = "whitenoise", specifier = ">=6.6.0" },
-    { name = "yfinance", marker = "extra == 'dev'", specifier = ">=0.2.38" },
+    { name = "yfinance", specifier = ">=0.2.38" },
 ]
 provides-extras = ["dev"]
 
