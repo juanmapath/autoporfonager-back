@@ -2,14 +2,19 @@ from typing import Dict, Type
 from apps.strategies.engines.base import BaseEngine
 from apps.strategies.engines.single_signal import SingleSignalEngine
 from apps.strategies.engines.multi_signal import MultiSignalEngine
-from apps.strategies.engines.cross_asset import CrossAssetEngine, FollowPriceEngine
+from apps.strategies.engines.cross_asset import CrossAssetEngine
+from apps.strategies.engines.ranked_allocation import RankedAllocationEngine
+from apps.strategies.engines.hold import HoldEngine
+from apps.strategies.engines.smart_accumulator import SmartAccumulatorEngine
 
 
 ENGINE_REGISTRY: Dict[str, Type[BaseEngine]] = {
     "single_signal": SingleSignalEngine,
     "multi_signal": MultiSignalEngine,
     "cross_asset": CrossAssetEngine,
-    "follow_price": FollowPriceEngine,
+    "ranked_allocation": RankedAllocationEngine,
+    "hold": HoldEngine,
+    "smart_accumulator": SmartAccumulatorEngine,
 }
 
 

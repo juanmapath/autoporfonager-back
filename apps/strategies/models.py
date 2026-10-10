@@ -8,9 +8,9 @@ class Strategy(TimeStampedModel):
         ("one_strategy", "One Strategy Bot"),
         ("multi_strategy", "Multi Strategy Bot"),
         ("cross_asset", "Cross Asset Bot"),
-        ("follow_price", "Follow Price Bot"),
-        ("signal_dollar", "Signal Dollar (Macro)"),
-        ("signal_options", "Signal Options (Macro)"),
+        ("ranked_allocation", "Ranked Allocation Bot (Metrics)"),
+        ("hold", "Hold & Reserve Bot"),
+        ("smart_accumulator", "Smart Accumulator Bot"),
     )
 
     slug = models.SlugField(unique=True, max_length=64)
@@ -104,3 +104,20 @@ class BacktestRun(TimeStampedModel):
 
     def __str__(self):
         return f"Backtest {self.strategy_slug} ({self.start_date} to {self.end_date}) [{self.status}]"
+
+
+class AllocationSnapshot(ImmutableModel):
+    """
+    Immutable audit record of a metric-based ranking for a `ranked_allocation` bot.
+    The engine always reads the latest snapshot; weights only change on rebalance dates.
+    """
+    version = models.ForeignKey(StrategyVersion, on_delete=models.CASCADE, related_name="allocation_snapshots")
+    as_of = models.DateTimeField(db_index=True)
+    weights = models.JSONField(default=dict)       # {symbol: weight}
+    diagnostics = models.JSONField(default=dict)   # {symbol: {metrics, percentiles, score, rank, missing}}
+
+    class Meta:
+        ordering = ["-as_of"]
+
+    def __str__(self):
+        return f"AllocationSnapshot {self.version} @ {self.as_of}"

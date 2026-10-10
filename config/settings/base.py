@@ -49,6 +49,7 @@ INSTALLED_APPS = [
     "apps.risk",
     "apps.notifications",
     "apps.ops",
+    "apps.fundamentals",
     "apps.legacy",
 ]
 
@@ -206,3 +207,8 @@ ALPACA_PAPER = os.getenv("ALPACA_PAPER", "True").lower() in ("true", "1", "yes")
 
 # Yahoo Provider
 YAHOO_USE_CURL_CFFI = os.getenv("YAHOO_USE_CURL_CFFI", "False").lower() in ("true", "1", "yes")
+
+# Fundamental data providers (FMP primary, EODHD / yfinance fallback)
+FMP_API_KEY = os.getenv("FMP_API_KEY", "")
+EODHD_API_KEY = os.getenv("EODHD_API_KEY", "")
+FMP_DAILY_CALL_BUDGET = int(os.getenv("FMP_DAILY_CALL_BUDGET", "240"))

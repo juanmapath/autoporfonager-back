@@ -68,6 +68,14 @@ class Command(BaseCommand):
                 "day_of_week": "1-5",  # Mon-Fri
                 "description": "Snapshot contable oficial de cierre del AUM total, cash y posiciones (16:15 NY).",
             },
+            {
+                "name": "[Weekly] Fundamentals Data Sync (Ranked Universe)",
+                "task": "sync_fundamentals_universe",
+                "minute": "00",
+                "hour": "02",
+                "day_of_week": "0",  # Sunday 02:00 AM NY
+                "description": "Descarga semanal de balances, estados de resultados y flujos para activos en bots Ranked Allocation.",
+            },
         ]
 
 

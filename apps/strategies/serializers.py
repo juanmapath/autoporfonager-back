@@ -70,7 +70,12 @@ class BotCreateSerializer(serializers.Serializer):
     bot_type = serializers.ChoiceField(choices=Strategy.KIND_CHOICES)
     traded_symbol = serializers.CharField(max_length=32, required=False, allow_blank=True)
     signal_symbol = serializers.CharField(max_length=32, required=False, allow_blank=True)
+    traded_symbols = serializers.ListField(child=serializers.CharField(max_length=32), required=False, default=list)
     strategies = StrategyConfigItemSerializer(many=True, required=False, default=list)
+    metrics = serializers.ListField(child=serializers.DictField(), required=False, default=list)
+    rank_weights = serializers.ListField(child=serializers.FloatField(), required=False, default=list)
+    rebalance_frequency = serializers.CharField(max_length=32, required=False, default="monthly")
+    execution = serializers.DictField(required=False, default=dict)
     leverage = serializers.FloatField(default=1.0)
     max_leverage = serializers.FloatField(default=1.0)
     use_regimes = serializers.BooleanField(default=False)
@@ -81,8 +86,9 @@ class BotCreateSerializer(serializers.Serializer):
         strategies = data.get("strategies", [])
         traded_symbol = data.get("traded_symbol")
         signal_symbol = data.get("signal_symbol")
+        traded_symbols = data.get("traded_symbols", [])
 
-        if bot_type in ("one_strategy", "multi_strategy", "cross_asset", "follow_price"):
+        if bot_type in ("one_strategy", "multi_strategy", "cross_asset", "smart_accumulator"):
             if not traded_symbol:
                 raise serializers.ValidationError({"traded_symbol": "El símbolo a operar es obligatorio para este tipo de bot."})
 
@@ -98,6 +104,38 @@ class BotCreateSerializer(serializers.Serializer):
             if len(strategies) != 1:
                 raise serializers.ValidationError({"strategies": "Un 'Cross Asset Bot' debe tener 1 estrategia seleccionada para evaluar sobre el activo de señales."})
 
+        if bot_type == "smart_accumulator" and len(strategies) != 1:
+            raise serializers.ValidationError({"strategies": "Un 'Smart Accumulator' requiere 1 estrategia seleccionada para disparar las compras."})
+
+        if bot_type == "hold":
+            is_cash = data.get("is_cash", False) or (traded_symbol or "").upper() in ("CASH", "USD")
+            if not is_cash and not traded_symbol:
+                raise serializers.ValidationError({"traded_symbol": "Debes especificar el activo a mantener o marcar 'Reserva de Cash'."})
+
+        if bot_type == "ranked_allocation":
+            # Multi-asset validation
+            symbols = traded_symbols or ([traded_symbol] if traded_symbol else [])
+            if len(symbols) < 2:
+                raise serializers.ValidationError({"traded_symbols": "Un 'Ranked Allocation Bot' debe contener al menos 2 activos."})
+
+            metrics = data.get("metrics", [])
+            if not metrics:
+                raise serializers.ValidationError({"metrics": "Debes especificar al menos 1 métrica para el ranking."})
+
+            rank_weights = data.get("rank_weights", [])
+            if rank_weights:
+                if len(rank_weights) != len(symbols):
+                    raise serializers.ValidationError({"rank_weights": f"Debes asignar exactamente {len(symbols)} ponderaciones (una por posición del ranking)."})
+                total_w = sum(rank_weights)
+                if abs(total_w - 1.0) > 0.001:
+                    raise serializers.ValidationError({"rank_weights": f"La suma de las ponderaciones de ranking debe ser 100% (suma actual: {round(total_w*100, 2)}%)."})
+
+            exec_cfg = data.get("execution", {})
+            if exec_cfg.get("mode") == "strategy":
+                strat_name = exec_cfg.get("strategy_name")
+                if not strat_name:
+                    raise serializers.ValidationError({"execution": "En modo 'strategy', debes especificar 'strategy_name'."})
+
         return data
 
     def create(self, validated_data):
@@ -106,7 +144,6 @@ class BotCreateSerializer(serializers.Serializer):
 
         name = validated_data["name"]
         slug = validated_data.get("slug") or slugify(name)
-        # Ensure unique slug
         base_slug = slug
         counter = 1
         while Strategy.objects.filter(slug=slug).exists():
@@ -118,12 +155,11 @@ class BotCreateSerializer(serializers.Serializer):
             "one_strategy": "single_signal",
             "multi_strategy": "multi_signal",
             "cross_asset": "cross_asset",
-            "follow_price": "follow_price",
-            "signal_dollar": "single_signal",
-            "signal_options": "single_signal",
+            "ranked_allocation": "ranked_allocation",
+            "hold": "hold",
+            "smart_accumulator": "smart_accumulator",
         }
         engine = engine_map.get(bot_type, "single_signal")
-        signal_only = bot_type in ("signal_dollar", "signal_options")
 
         strategy = Strategy.objects.create(
             name=name,
@@ -132,14 +168,19 @@ class BotCreateSerializer(serializers.Serializer):
             kind=bot_type,
             engine=engine,
             decision_offset_minutes=validated_data.get("decision_offset_minutes", 25),
-            signal_only=signal_only,
+            signal_only=False,
             is_active=True,
         )
 
-        # Build Version Params
         version_params = {
             "bot_type": bot_type,
             "strategies": validated_data.get("strategies", []),
+            "metrics": validated_data.get("metrics", []),
+            "rank_weights": validated_data.get("rank_weights", []),
+            "rebalance_frequency": validated_data.get("rebalance_frequency", "monthly"),
+            "execution": validated_data.get("execution", {"mode": "hold"}),
+            "participates_in_rebalance": validated_data.get("participates_in_rebalance", True),
+            "is_cash": validated_data.get("is_cash", False) or (validated_data.get("traded_symbol") or "").upper() in ("CASH", "USD"),
             "leverage": validated_data.get("leverage", 1.0),
             "max_leverage": validated_data.get("max_leverage", 1.0),
             "use_regimes": validated_data.get("use_regimes", False),
@@ -153,18 +194,34 @@ class BotCreateSerializer(serializers.Serializer):
         )
 
         # Attach instruments
-        traded_symbol = validated_data.get("traded_symbol")
-        if traded_symbol:
-            traded_inst, _ = Instrument.objects.get_or_create(
-                symbol=traded_symbol.upper(),
-                defaults={"name": traded_symbol.upper(), "asset_class": "etf"}
-            )
-            StrategyInstrument.objects.create(
-                version=version,
-                instrument=traded_inst,
-                role="traded",
-                weight=1.0,
-            )
+        if bot_type == "ranked_allocation":
+            symbols = validated_data.get("traded_symbols") or [validated_data.get("traded_symbol")]
+            for s in symbols:
+                if not s:
+                    continue
+                inst, _ = Instrument.objects.get_or_create(
+                    symbol=s.upper(),
+                    defaults={"name": s.upper(), "asset_class": "equity"}
+                )
+                StrategyInstrument.objects.create(
+                    version=version,
+                    instrument=inst,
+                    role="traded",
+                    weight=1.0,
+                )
+        else:
+            traded_symbol = validated_data.get("traded_symbol")
+            if traded_symbol:
+                traded_inst, _ = Instrument.objects.get_or_create(
+                    symbol=traded_symbol.upper(),
+                    defaults={"name": traded_symbol.upper(), "asset_class": "etf"}
+                )
+                StrategyInstrument.objects.create(
+                    version=version,
+                    instrument=traded_inst,
+                    role="traded",
+                    weight=1.0,
+                )
 
         signal_symbol = validated_data.get("signal_symbol")
         if signal_symbol and bot_type == "cross_asset":
@@ -203,6 +260,12 @@ class BotCreateSerializer(serializers.Serializer):
         version_params = {
             "bot_type": bot_type,
             "strategies": validated_data.get("strategies", []),
+            "metrics": validated_data.get("metrics", []),
+            "rank_weights": validated_data.get("rank_weights", []),
+            "rebalance_frequency": validated_data.get("rebalance_frequency", "monthly"),
+            "execution": validated_data.get("execution", {"mode": "hold"}),
+            "participates_in_rebalance": validated_data.get("participates_in_rebalance", True),
+            "is_cash": validated_data.get("is_cash", False) or (validated_data.get("traded_symbol") or "").upper() in ("CASH", "USD"),
             "leverage": validated_data.get("leverage", 1.0),
             "max_leverage": validated_data.get("max_leverage", 1.0),
             "use_regimes": validated_data.get("use_regimes", False),
@@ -215,18 +278,34 @@ class BotCreateSerializer(serializers.Serializer):
             status="live",
         )
 
-        traded_symbol = validated_data.get("traded_symbol")
-        if traded_symbol:
-            traded_inst, _ = Instrument.objects.get_or_create(
-                symbol=traded_symbol.upper(),
-                defaults={"name": traded_symbol.upper(), "asset_class": "etf"}
-            )
-            StrategyInstrument.objects.create(
-                version=new_version,
-                instrument=traded_inst,
-                role="traded",
-                weight=1.0,
-            )
+        if bot_type == "ranked_allocation":
+            symbols = validated_data.get("traded_symbols") or [validated_data.get("traded_symbol")]
+            for s in symbols:
+                if not s:
+                    continue
+                inst, _ = Instrument.objects.get_or_create(
+                    symbol=s.upper(),
+                    defaults={"name": s.upper(), "asset_class": "equity"}
+                )
+                StrategyInstrument.objects.create(
+                    version=new_version,
+                    instrument=inst,
+                    role="traded",
+                    weight=1.0,
+                )
+        else:
+            traded_symbol = validated_data.get("traded_symbol")
+            if traded_symbol:
+                traded_inst, _ = Instrument.objects.get_or_create(
+                    symbol=traded_symbol.upper(),
+                    defaults={"name": traded_symbol.upper(), "asset_class": "etf"}
+                )
+                StrategyInstrument.objects.create(
+                    version=new_version,
+                    instrument=traded_inst,
+                    role="traded",
+                    weight=1.0,
+                )
 
         signal_symbol = validated_data.get("signal_symbol")
         if signal_symbol and bot_type == "cross_asset":

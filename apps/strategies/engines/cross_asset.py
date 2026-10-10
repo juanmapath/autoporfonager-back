@@ -52,33 +52,3 @@ class CrossAssetEngine(BaseEngine):
             "targets": {k: str(v) for k, v in targets.items()},
         }
         return targets, diagnostics
-
-
-class FollowPriceEngine(BaseEngine):
-    """
-    Follow Price Engine with trailing stop and price thresholds.
-    """
-
-    def compute_signal(
-        self,
-        ohlcv_data: Dict[str, pd.DataFrame],
-        params: Dict[str, Any],
-        instruments_weights: Dict[str, Decimal],
-    ) -> Tuple[Dict[str, Decimal], Dict[str, Any]]:
-        targets = {}
-        diagnostics = {}
-        trailing_pct = Decimal(str(params.get("trailing_pct", 0.05)))
-
-        for sym, df in ohlcv_data.items():
-            if df is None or df.empty:
-                targets[sym] = Decimal("0.0")
-                continue
-            close = df["Close"].iloc[-1]
-            high_recent = df["High"].rolling(window=20).max().iloc[-1]
-            drawdown = (high_recent - close) / high_recent if high_recent > 0 else 0
-            is_above_stop = drawdown < float(trailing_pct)
-            weight = instruments_weights.get(sym, Decimal("1.0"))
-            targets[sym] = weight if is_above_stop else Decimal("0.0")
-            diagnostics[sym] = {"drawdown_from_high": float(drawdown), "active": is_above_stop}
-
-        return targets, diagnostics

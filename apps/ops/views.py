@@ -53,11 +53,13 @@ class OpsStrategiesView(APIView):
 
     def get(self, request):
         from apps.strategies.signals.metadata import BOT_CATALOG, STRATEGIES_CATALOG
+        from apps.fundamentals.metrics import get_metrics_catalog
         strategies = Strategy.objects.all().prefetch_related("versions")
         return Response({
             "strategies": StrategySerializer(strategies, many=True).data,
             "bot_types": BOT_CATALOG,
             "strategies_catalog": STRATEGIES_CATALOG,
+            "metrics_catalog": get_metrics_catalog(),
         })
 
     def post(self, request):
@@ -173,6 +175,8 @@ class OpsBacktestView(APIView):
         start_date = str(request.data.get("start_date") or default_start)
         end_date = str(request.data.get("end_date") or today_str)
         initial_capital = float(request.data.get("initial_capital", 100000.0))
+        periodic_deposit = float(request.data.get("periodic_deposit", 0.0) or 0.0)
+        deposit_frequency = str(request.data.get("deposit_frequency", "monthly") or "monthly")
         base_leverage = float(request.data.get("leverage") or request.data.get("base_leverage") or 1.0)
         max_leverage = float(request.data.get("max_leverage") or base_leverage)
         use_dynamic_leverage = bool(request.data.get("use_dynamic_leverage", request.data.get("use_regimes", False)))
@@ -212,6 +216,8 @@ class OpsBacktestView(APIView):
                     leverage=base_leverage,
                     max_leverage=max_leverage,
                     use_dynamic_leverage=use_dynamic_leverage,
+                    periodic_deposit=periodic_deposit,
+                    deposit_frequency=deposit_frequency,
                 )
             else:
                 res = engine.run_for_strategy(
@@ -221,6 +227,8 @@ class OpsBacktestView(APIView):
                     leverage=base_leverage,
                     max_leverage=max_leverage,
                     use_dynamic_leverage=use_dynamic_leverage,
+                    periodic_deposit=periodic_deposit,
+                    deposit_frequency=deposit_frequency,
                 )
 
             run.status = "done"
@@ -239,6 +247,12 @@ class OpsBacktestView(APIView):
                 "benchmark_cagr_pct": res["benchmark_cagr_pct"],
                 "benchmark_max_drawdown_pct": res["benchmark_max_drawdown_pct"],
                 "alpha_vs_benchmark": res["alpha_vs_benchmark"],
+                "total_invested": res.get("total_invested", initial_capital),
+                "periodic_deposit": res.get("periodic_deposit", 0.0),
+                "deposit_frequency": res.get("deposit_frequency", "monthly"),
+                "deposits_count": res.get("deposits_count", 0),
+                "accumulated_shares": res.get("accumulated_shares", 0.0),
+                "cash_remaining": res.get("cash_remaining", 0.0),
                 "trades": res.get("trades", []),
                 "trade_markers": res.get("trade_markers", []),
                 "applied_leverage": res.get("applied_leverage", {}),
@@ -251,6 +265,12 @@ class OpsBacktestView(APIView):
             data["trade_markers"] = res.get("trade_markers", [])
             data["applied_leverage"] = res.get("applied_leverage", {})
             data["symbol"] = res.get("symbol", effective_traded_sym)
+            data["bot_type"] = res.get("bot_type", bot_type)
+            data["total_invested"] = res.get("total_invested", initial_capital)
+            data["periodic_deposit"] = res.get("periodic_deposit", 0.0)
+            data["deposit_frequency"] = res.get("deposit_frequency", "monthly")
+            data["accumulated_shares"] = res.get("accumulated_shares", 0.0)
+            data["cash_remaining"] = res.get("cash_remaining", 0.0)
             return Response(data, status=status.HTTP_201_CREATED)
         except Exception as e:
             run.status = "failed"

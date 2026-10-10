@@ -109,6 +109,17 @@ def compute_regimes_and_signals():
 
         try:
             targets, diagnostics = engine.compute_signal(ohlcv_dict, v.params, weights)
+
+            # For ranked_allocation bots, audit the ranking into AllocationSnapshot
+            if strat.kind == "ranked_allocation":
+                from apps.strategies.models import AllocationSnapshot
+                AllocationSnapshot.objects.create(
+                    version=v,
+                    as_of=timezone.now(),
+                    weights={sym: str(targets.get(sym, Decimal("0.0"))) for sym in targets},
+                    diagnostics=sanitize_json_for_db(diagnostics),
+                )
+
             for sym, exposure in targets.items():
                 inst = Instrument.objects.filter(symbol=sym).first()
                 if inst:
@@ -352,3 +363,14 @@ def accounting_daily_snapshot():
 
     return f"Created {created} daily equity snapshots"
 
+
+
+
+@shared_task(name="sync_fundamentals_universe", queue="marketdata")
+def sync_fundamentals_universe():
+    """Weekly/daily task to sync financial statements for ranked_allocation universe."""
+    logger.info("Executing sync_fundamentals_universe...")
+    from apps.fundamentals.services import sync_active_universe
+    res = sync_active_universe(force=False)
+    logger.info(f"Fundamental sync completed: {res['synced']} instruments updated.")
+    return res
