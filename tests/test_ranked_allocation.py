@@ -109,3 +109,48 @@ def test_ranked_allocation_engine_strategy_mode_cash_when_out():
     for sym, exp in targets.items():
         assert exp == Decimal("0.0")
         assert diagnostics[sym]["execution_mode"] == "strategy"
+
+
+@pytest.mark.django_db
+def test_ranked_allocation_per_asset_regime_leverage_hold_mode():
+    """Tests that each asset in RankedAllocationEngine gets individual dynamic leverage based on its historical regime."""
+    Instrument.objects.create(symbol="STRONG", name="Strong Uptrend", asset_class="equity")
+    Instrument.objects.create(symbol="WEAK", name="Weak Downtrend", asset_class="equity")
+
+    dates = pd.date_range("2024-01-01", periods=60)
+    # STRONG has steady positive daily gains -> high Gain-to-Pain ratio and above mean -> bull_strong -> max_leverage (2.0x)
+    strong_closes = [100.0 + i * 1.5 for i in range(60)]
+    # WEAK has steady daily losses -> below mean -> neutral_or_weak -> base_leverage (1.0x)
+    weak_closes = [100.0 - i * 0.5 for i in range(60)]
+
+    ohlcv_data = {
+        "STRONG": pd.DataFrame({"Close": strong_closes, "Low": strong_closes, "High": strong_closes}, index=dates),
+        "WEAK": pd.DataFrame({"Close": weak_closes, "Low": weak_closes, "High": weak_closes}, index=dates),
+    }
+
+    engine = RankedAllocationEngine()
+    params = {
+        "metrics": [],
+        "rank_weights": [0.60, 0.40],
+        "leverage": 1.0,
+        "max_leverage": 2.0,
+        "use_regimes": True,
+        "execution": {"mode": "hold"},
+    }
+
+    targets, diagnostics = engine.compute_signal(ohlcv_data, params, {})
+
+    # Alphabetical tie-break: STRONG is rank 1 (assigned_weight = 0.60)
+    # Plus strong bull regime -> applied_leverage = 2.0 -> target_exposure = 0.60 * 2.0 = 1.20
+    assert diagnostics["STRONG"]["rank"] == 1
+    assert diagnostics["STRONG"]["regime_state"] == "bull_strong"
+    assert diagnostics["STRONG"]["applied_leverage"] == 2.0
+    assert targets["STRONG"] == Decimal("1.20")
+
+    # WEAK has rank 2 (assigned_weight = 0.40) and weak regime -> applied_leverage = 1.0 -> target_exposure = 0.40
+    assert diagnostics["WEAK"]["rank"] == 2
+    assert diagnostics["WEAK"]["regime_state"] == "neutral_or_weak"
+    assert diagnostics["WEAK"]["applied_leverage"] == 1.0
+    assert targets["WEAK"] == Decimal("0.40")
+
+

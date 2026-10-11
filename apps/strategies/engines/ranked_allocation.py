@@ -48,6 +48,11 @@ class RankedAllocationEngine(BaseEngine):
         underlying_strat_name = execution.get("strategy_name") or execution.get("strategy_function")
         underlying_strat_params = execution.get("params", execution.get("strategy_params", {}))
 
+        # Leverage & Regime parameters
+        base_leverage = float(params.get("leverage", 1.0))
+        max_leverage = float(params.get("max_leverage", base_leverage))
+        use_regimes = bool(params.get("use_regimes", False))
+
         symbols = list(ohlcv_data.keys())
         n_assets = len(symbols)
 
@@ -174,7 +179,7 @@ class RankedAllocationEngine(BaseEngine):
             weight = rank_weights[rank_idx] if rank_idx < len(rank_weights) else Decimal("0.0")
             assigned_capital_weights[sym] = weight
 
-        # 8. Execution Layer: Hold vs Strategy
+        # 8. Execution Layer: Hold vs Strategy + Per-Asset Dynamic Regime Leverage
         targets: Dict[str, Decimal] = {}
         diagnostics: Dict[str, Any] = {}
 
@@ -188,12 +193,13 @@ class RankedAllocationEngine(BaseEngine):
 
             sub_signal = 1
             sub_indicators = {}
+            sigs = None
 
             if exec_mode == "strategy":
                 if underlying_strat_func and df is not None and not df.empty:
                     try:
                         sigs, ind = underlying_strat_func(df, underlying_strat_params)
-                        sub_signal = int(sigs.iloc[-1]) if not sigs.empty else 0
+                        sub_signal = self._resolve_active_signal_state(sigs, ind)
                         if isinstance(ind, pd.DataFrame) and not ind.empty:
                             sub_indicators = {
                                 k: (None if pd.isna(v) else float(v) if isinstance(v, (int, float, np.number)) else str(v))
@@ -204,11 +210,22 @@ class RankedAllocationEngine(BaseEngine):
                 else:
                     sub_signal = 0
 
+            applied_lev, regime_pf, regime_state = self._compute_asset_regime_leverage(
+                df=df,
+                sigs=sigs,
+                base_leverage=base_leverage,
+                max_leverage=max_leverage,
+                use_regimes=use_regimes,
+            )
+
+            lev_dec = Decimal("1") if abs(applied_lev - 1.0) < 1e-9 else Decimal(str(round(applied_lev, 4)))
+
+            if exec_mode == "strategy":
                 # If strategy is out (sub_signal <= 0), exposure is 0 (stays in cash)
-                exposure = cap_weight if sub_signal > 0 else Decimal("0.0")
+                exposure = (cap_weight * lev_dec) if sub_signal > 0 else Decimal("0.0")
             else:
-                # 'hold' mode: direct exposure equal to ranked weight
-                exposure = cap_weight
+                # 'hold' mode: exposure scaled by per-asset regime leverage
+                exposure = cap_weight * lev_dec
 
             targets[sym] = exposure
 
@@ -220,6 +237,9 @@ class RankedAllocationEngine(BaseEngine):
                 "rank": rank_idx + 1,
                 "composite_score": round(composite_scores.get(sym, 0.0), 4),
                 "assigned_weight": str(cap_weight),
+                "applied_leverage": round(applied_lev, 4),
+                "regime_profit_factor": regime_pf,
+                "regime_state": regime_state,
                 "target_exposure": str(exposure),
                 "execution_mode": exec_mode,
                 "sub_strategy_signal": sub_signal,
@@ -229,3 +249,105 @@ class RankedAllocationEngine(BaseEngine):
             }
 
         return targets, diagnostics
+
+    @staticmethod
+    def _resolve_active_signal_state(sigs: pd.Series, ind: Any) -> int:
+        """
+        Determines whether the underlying strategy is currently in an active LONG position (1) or FLAT (0).
+        Supports both multi-state pulse strategies (1=entry, 0=hold, -1=exit with SignalType)
+        and continuous signal series.
+        """
+        if sigs is None or sigs.empty:
+            return 0
+
+        if isinstance(ind, pd.DataFrame) and "SignalType" in ind.columns and not ind.empty:
+            last_type = str(ind["SignalType"].iloc[-1]).lower()
+            return 1 if last_type not in ("none", "nan", "") else 0
+
+        # Walk signals chronologically if exit pulses (-1) are used
+        if (sigs == -1).any():
+            in_pos = False
+            for s_val in sigs.values:
+                if s_val == 1:
+                    in_pos = True
+                elif s_val == -1:
+                    in_pos = False
+            return 1 if in_pos else 0
+
+        return 1 if int(sigs.iloc[-1]) > 0 else 0
+
+    @staticmethod
+    def _compute_asset_regime_leverage(
+        df: Optional[pd.DataFrame],
+        sigs: Optional[pd.Series],
+        base_leverage: float,
+        max_leverage: float,
+        use_regimes: bool,
+    ) -> Tuple[float, Optional[float], str]:
+        """
+        Computes individual per-asset dynamic leverage based on historical regime.
+        - In 'strategy' mode (when `sigs` is provided and has >= 2 closed trades),
+          uses Walk-Forward Profit Factor of the strategy on that specific asset.
+        - In 'hold' mode (or fallback when < 2 strategy trades exist),
+          uses the asset's 60-bar Gain-to-Pain ratio (daily Profit Factor) and SMA trend filter.
+        """
+        if not use_regimes or df is None or df.empty or "Close" not in df.columns:
+            return base_leverage, None, "fixed"
+
+        eff_max = max(base_leverage, max_leverage)
+
+        # 1. Try strategy-specific Walk-Forward Profit Factor on this asset
+        if sigs is not None and not sigs.empty and len(sigs) == len(df):
+            in_pos = False
+            entry_price = 0.0
+            trade_returns: List[float] = []
+            for s_val, c_val in zip(sigs.values, df["Close"].values):
+                if s_val == 1 and not in_pos:
+                    in_pos = True
+                    entry_price = float(c_val)
+                elif s_val == -1 and in_pos:
+                    in_pos = False
+                    if entry_price > 0:
+                        trade_returns.append((float(c_val) - entry_price) / entry_price)
+
+            if len(trade_returns) >= 2:
+                gains = sum(r for r in trade_returns if r > 0)
+                losses = abs(sum(r for r in trade_returns if r < 0))
+                pf = (gains / losses) if losses > 0 else (5.0 if gains > 0 else 1.0)
+                if pf >= 2.5:
+                    return eff_max, round(pf, 4), "bull_strong"
+                elif pf >= 1.5:
+                    mid_lev = base_leverage + 0.5 * (eff_max - base_leverage)
+                    return mid_lev, round(pf, 4), "bull_moderate"
+                else:
+                    return base_leverage, round(pf, 4), "neutral_or_weak"
+
+        # 2. Asset price regime (used in 'hold' mode or fallback when < 2 strategy trades)
+        closes = df["Close"].dropna()
+        if len(closes) < 10:
+            return base_leverage, None, "insufficient_data"
+
+        window_closes = closes.iloc[-60:] if len(closes) >= 60 else closes
+        rets = window_closes.pct_change().dropna()
+        if rets.empty:
+            return base_leverage, None, "insufficient_data"
+
+        pos_sum = float(rets[rets > 0].sum())
+        neg_sum = float(abs(rets[rets < 0].sum()))
+        if neg_sum > 0:
+            asset_pf = pos_sum / neg_sum
+        else:
+            asset_pf = 3.0 if pos_sum > 0 else 1.0
+
+        sma_ref = float(window_closes.mean())
+        last_close = float(window_closes.iloc[-1])
+        in_uptrend = last_close >= sma_ref
+
+        if in_uptrend and asset_pf >= 1.35:
+            return eff_max, round(asset_pf, 4), "bull_strong"
+        elif in_uptrend and asset_pf >= 1.10:
+            mid_lev = base_leverage + 0.5 * (eff_max - base_leverage)
+            return mid_lev, round(asset_pf, 4), "bull_moderate"
+        else:
+            return base_leverage, round(asset_pf, 4), "neutral_or_weak"
+
