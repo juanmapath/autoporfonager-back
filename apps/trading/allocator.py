@@ -35,6 +35,7 @@ class PortfolioAllocator:
         # Netting map: (broker_account_id, instrument_id) -> total_delta_qty
         netting_map: Dict[tuple, Decimal] = {}
         intent_inst_map = {}
+        processed_strategy_ids = set()
 
         for alloc in allocations:
             strategy = alloc.strategy
@@ -42,6 +43,7 @@ class PortfolioAllocator:
             version = alloc.version or strategy.versions.filter(status="live").first()
             if not version:
                 continue
+            processed_strategy_ids.add(strategy.id)
 
             # Fetch latest signals for instruments in this version
             strat_instruments = version.instruments.filter(role="traded").select_related("instrument")
@@ -152,6 +154,36 @@ class PortfolioAllocator:
                 key = (ba_id, inst.id)
                 netting_map[key] = netting_map.get(key, Decimal("0.0")) + delta
                 intent_inst_map[key] = (broker_acc, inst)
+
+        # --- LIQUIDATION SWEEP FOR STRATEGIES WITHOUT AN ACTIVE ALLOCATION ---
+        # Positions held by strategies whose allocation was disabled / set to 0% (or removed) are not
+        # visited by the loop above, so they would stay open forever. Liquidate them to 0 shares.
+        stranded_positions = LogicalPosition.objects.filter(
+            portfolio=portfolio,
+            qty__gt=0,
+        ).exclude(strategy_id__in=processed_strategy_ids).select_related("strategy", "instrument", "broker_account")
+
+        for pos in stranded_positions:
+            broker_acc = pos.broker_account or portfolio.broker_accounts.filter(trading_enabled=True).first()
+            delta = -pos.qty
+
+            t = Target.objects.create(
+                run=self.run,
+                strategy=pos.strategy,
+                instrument=pos.instrument,
+                broker_account=broker_acc,
+                sleeve_capital=Decimal("0.00"),
+                target_qty=Decimal("0.0"),
+                current_qty=pos.qty,
+                delta_qty=delta,
+                reason="liquidate_disabled_allocation",
+            )
+            targets_created.append(t)
+
+            ba_id = broker_acc.id if broker_acc else None
+            key = (ba_id, pos.instrument_id)
+            netting_map[key] = netting_map.get(key, Decimal("0.0")) + delta
+            intent_inst_map[key] = (broker_acc, pos.instrument)
 
         # Generate netted OrderIntents (with rebalance band threshold: 2.5% drift or >= $25 order)
         REBALANCE_BAND_PP = Decimal("0.025")

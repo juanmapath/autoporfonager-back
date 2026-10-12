@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from apps.strategies.engines.base import BaseEngine
 from apps.strategies.signals.catalog import STRATEGY_MAP
+from apps.strategies.signals.sizing import pulses_to_long_state, resolve_leverage_params, current_trade_leverage
 
 
 class MultiSignalEngine(BaseEngine):
@@ -30,6 +31,8 @@ class MultiSignalEngine(BaseEngine):
             strategies = raw_strategies
             strategies_params = params.get("strategies_params", [])
 
+
+        base_leverage, max_leverage, use_dynamic_leverage = resolve_leverage_params(params)
 
         targets = {}
         diagnostics = {}
@@ -58,18 +61,7 @@ class MultiSignalEngine(BaseEngine):
                 continue
 
             # State tracking: convert each strategy to active long state (matching xmain.py lines 188-206)
-            active_states = []
-            for sig in all_signals:
-                state = pd.Series(False, index=sig.index)
-                current_state = False
-                for i in range(len(sig)):
-                    val = sig.iloc[i]
-                    if val == 1:
-                        current_state = True
-                    elif val == -1:
-                        current_state = False
-                    state.iloc[i] = current_state
-                active_states.append(state)
+            active_states = [pulses_to_long_state(sig) for sig in all_signals]
 
             combined_long = pd.Series(False, index=df.index)
             for state in active_states:
@@ -77,13 +69,21 @@ class MultiSignalEngine(BaseEngine):
 
             is_long = combined_long.iloc[-1]
             weight = instruments_weights.get(symbol, Decimal("1.0"))
-            exposure = weight if is_long else Decimal("0.0")
+
+            # Apalancamiento fijado en la entrada del trade abierto (misma lógica que el backtest)
+            applied_leverage = 1.0
+            if is_long:
+                applied_leverage = current_trade_leverage(
+                    df["Close"].values, combined_long.values, base_leverage, max_leverage, use_dynamic_leverage
+                )
+            exposure = weight * Decimal(str(round(applied_leverage, 4))) if is_long else Decimal("0.0")
             targets[symbol] = exposure
 
             active_names = [strategies[i] for i, s in enumerate(active_states) if s.iloc[-1]]
             diagnostics[symbol] = {
                 "active_strategies": active_names,
                 "is_long": bool(is_long),
+                "applied_leverage": round(applied_leverage, 4),
                 "exposure": str(exposure),
             }
 

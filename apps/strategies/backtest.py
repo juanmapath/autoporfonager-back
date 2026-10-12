@@ -5,6 +5,7 @@ import pandas as pd
 from django.utils import timezone
 
 from apps.strategies.signals.catalog import STRATEGY_MAP
+from apps.strategies.signals.sizing import dynamic_leverage_from_pnls
 
 
 def fetch_historical_ohlcv(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -630,24 +631,10 @@ class BacktestEngine:
             # Buy Signal (1)
             if sig == 1 and not in_position:
                 # 1. Determinar Apalancamiento Dinámico según Profit Factor Walk-Forward
-                if use_dynamic_leverage and len(trades) >= 2:
-                    gains = [t["pnl"] for t in trades if t["pnl"] > 0]
-                    losses = [abs(t["pnl"]) for t in trades if t["pnl"] <= 0]
-                    sum_gains = sum(gains)
-                    sum_losses = sum(losses)
-                    running_pf = sum_gains / sum_losses if sum_losses > 0 else (99.0 if sum_gains > 0 else 1.0)
-
-                    # Escalamiento adaptativo
-                    if running_pf >= 2.5:
-                        active_leverage = max_leverage
-                    elif running_pf >= 1.5:
-                        active_leverage = base_leverage + 0.5 * (max_leverage - base_leverage)
-                    else:
-                        active_leverage = base_leverage
-                else:
-                    active_leverage = base_leverage
-
-                active_leverage = max(1.0, float(active_leverage))
+                # (lógica compartida con los motores en vivo: apps/strategies/signals/sizing.py)
+                active_leverage = dynamic_leverage_from_pnls(
+                    [t["pnl"] for t in trades], base_leverage, max_leverage, use_dynamic_leverage
+                )
                 adj_price = price * (1.0 + self.slippage)
                 total_equity = cash
                 investable = (total_equity * active_leverage) - self.commission

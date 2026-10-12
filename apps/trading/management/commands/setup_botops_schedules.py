@@ -18,6 +18,8 @@ class Command(BaseCommand):
         PeriodicTask.objects.filter(name__startswith="[3/5]").delete()
         PeriodicTask.objects.filter(name__startswith="[4/5]").delete()
         PeriodicTask.objects.filter(name__startswith="[5/5]").delete()
+        # Replaced by the 15:57 dispatch; left enabled it would send orders at 15:55.
+        PeriodicTask.objects.filter(name="[4/6] Fallback: Order Dispatch (Alpaca & Simulated)").delete()
 
         schedules_def = [
             {
@@ -26,7 +28,7 @@ class Command(BaseCommand):
                 "minute": "50",
                 "hour": "15",
                 "day_of_week": "1-5",  # Mon-Fri
-                "description": "Pipeline consecutivo: descarga market data, genera señales, rebalancea carteras y despacha órdenes MOC/Market (15:50 NY).",
+                "description": "Pipeline de preparación (15:50 NY): descarga market data, genera señales y rebalancea carteras. Las órdenes se envían a las 15:57 NY.",
             },
             {
                 "name": "[2/6] Fallback: Compute Quantitative Signals",
@@ -45,12 +47,12 @@ class Command(BaseCommand):
                 "description": "Respaldo automático a las 15:53 NY: genera rebalanceos para cualquier cartera pendiente hoy.",
             },
             {
-                "name": "[4/6] Fallback: Order Dispatch (Alpaca & Simulated)",
+                "name": "[4/6] Order Dispatch (Alpaca Market DAY & Simulated)",
                 "task": "dispatch_moc_and_manual_orders",
-                "minute": "55",
+                "minute": "57",
                 "hour": "15",
                 "day_of_week": "1-5",  # Mon-Fri
-                "description": "Respaldo final de despacho a las 15:55 NY antes del cierre de mercado para cualquier orden pendiente.",
+                "description": "Envío de órdenes a las 15:57 NY: órdenes de mercado DAY (admiten fracciones) justo antes del cierre.",
             },
             {
                 "name": "[5/6] Post-Close Broker Fills & Trade Reconciliation",
@@ -59,6 +61,14 @@ class Command(BaseCommand):
                 "hour": "16",
                 "day_of_week": "1-5",  # Mon-Fri
                 "description": "Consulta a Alpaca tras el cierre (16:05 NY) los fills, precios de ejecución reales y actualiza posiciones contables.",
+            },
+            {
+                "name": "[Daily] Broker vs Logical Positions Reconciliation",
+                "task": "reconcile_positions_vs_broker",
+                "minute": "10",
+                "hour": "16",
+                "day_of_week": "1-5",  # Mon-Fri
+                "description": "Compara posiciones lógicas con las posiciones reales en Alpaca (16:10 NY) y alerta por Telegram si difieren.",
             },
             {
                 "name": "[6/6] Post-Market Daily Equity & Position Snapshot",

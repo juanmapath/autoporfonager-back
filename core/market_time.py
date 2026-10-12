@@ -7,7 +7,7 @@ NY_TZ = ZoneInfo("America/New_York")
 UTC_TZ = ZoneInfo("UTC")
 
 DECISION_OFFSET_MINUTES = 15
-MOC_CUTOFF_OFFSET_MINUTES = 2
+DISPATCH_CUTOFF_OFFSET_MINUTES = 1
 
 
 def get_ny_now() -> datetime:
@@ -48,14 +48,14 @@ def get_market_hours(dt: Optional[date] = None) -> Optional[Tuple[datetime, date
 
 
 def get_decision_window(dt: Optional[date] = None) -> Optional[Tuple[datetime, datetime]]:
-    """Returns (decision_start, moc_cutoff) for market orders on given day."""
+    """Returns (decision_start, dispatch_cutoff) for market orders on given day."""
     hours = get_market_hours(dt)
     if not hours:
         return None
     _, market_close = hours
     decision_start = market_close - timedelta(minutes=DECISION_OFFSET_MINUTES)
-    moc_cutoff = market_close - timedelta(minutes=MOC_CUTOFF_OFFSET_MINUTES)
-    return decision_start, moc_cutoff
+    dispatch_cutoff = market_close - timedelta(minutes=DISPATCH_CUTOFF_OFFSET_MINUTES)
+    return decision_start, dispatch_cutoff
 
 
 def is_last_business_day(dt: Optional[date] = None, frequency: str = "monthly") -> bool:

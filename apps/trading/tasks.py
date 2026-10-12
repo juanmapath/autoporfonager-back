@@ -107,8 +107,15 @@ def compute_regimes_and_signals():
         if not ohlcv_dict:
             continue
 
+        # Los bots cross_asset guardan el activo de señales como instrumento con rol signal_source
+        engine_params = dict(v.params or {})
+        if not engine_params.get("source_symbol"):
+            source_si = next((si for si in instruments if si.role == "signal_source"), None)
+            if source_si:
+                engine_params["source_symbol"] = source_si.instrument.symbol
+
         try:
-            targets, diagnostics = engine.compute_signal(ohlcv_dict, v.params, weights)
+            targets, diagnostics = engine.compute_signal(ohlcv_dict, engine_params, weights)
 
             # For ranked_allocation bots, audit the ranking into AllocationSnapshot
             if strat.kind == "ranked_allocation":
@@ -183,7 +190,11 @@ def orchestrate_portfolio_runs():
 
 @shared_task(name="dispatch_moc_and_manual_orders", queue="execution")
 def dispatch_moc_and_manual_orders():
-    """Despacha órdenes MOC a Alpaca y genera los fills simulados + avisos de Telegram."""
+    """
+    Despacho (15:57 NY): envía órdenes de mercado DAY (admiten fracciones) a Alpaca y genera
+    los fills simulados + avisos de Telegram. El nombre de la tarea se conserva por compatibilidad
+    con los schedules ya registrados; ya no se usan órdenes MOC.
+    """
     logger.info("Executing dispatch_moc_and_manual_orders...")
     active_runs = RebalanceRun.objects.filter(status="executing")
     dispatcher = OrderDispatcher()
@@ -196,8 +207,11 @@ def dispatch_moc_and_manual_orders():
                 dispatched_count += 1
             except Exception as e:
                 logger.error(f"Failed to dispatch intent {intent.id}: {e}")
-        run.status = "done"
-        run.save(update_fields=["status"])
+        # No pisar estados terminales fijados durante el despacho (p. ej. missed_cutoff)
+        run.refresh_from_db(fields=["status"])
+        if run.status == "executing":
+            run.status = "done"
+            run.save(update_fields=["status"])
 
     return f"Dispatched {dispatched_count} orders"
 
@@ -205,36 +219,32 @@ def dispatch_moc_and_manual_orders():
 @shared_task(name="run_daily_trading_pipeline", queue="execution")
 def run_daily_trading_pipeline():
     """
-    Cadena inmediata (15:50 NY):
+    Cadena de preparación (15:50 NY):
     1. Descarga cotizaciones y barras (marketdata_refresh)
     2. Calcula regímenes y señales cuantitativas (compute_regimes_and_signals)
     3. Rebalancea portafolios generando intenciones de orden (orchestrate_portfolio_runs)
-    4. Despacha inmediatamente las órdenes MOC/Market a Alpaca o simulador (dispatch_moc_and_manual_orders)
+
+    El envío de órdenes NO ocurre aquí: lo hace dispatch_moc_and_manual_orders a las 15:57 NY,
+    para ejecutar lo más cerca posible del cierre con órdenes de mercado DAY.
     """
     logger.info(">>> [PIPELINE 15:50 NY] Iniciando pipeline automatizado consecutivo...")
     try:
         r1 = marketdata_refresh()
-        logger.info(f"[1/4] Market data refresh: {r1}")
+        logger.info(f"[1/3] Market data refresh: {r1}")
     except Exception as e:
-        logger.error(f"[1/4] Market data refresh falló: {e}")
+        logger.error(f"[1/3] Market data refresh falló: {e}")
 
     try:
         r2 = compute_regimes_and_signals()
-        logger.info(f"[2/4] Regimes & signals: {r2}")
+        logger.info(f"[2/3] Regimes & signals: {r2}")
     except Exception as e:
-        logger.error(f"[2/4] Compute signals falló: {e}")
+        logger.error(f"[2/3] Compute signals falló: {e}")
 
     try:
         r3 = orchestrate_portfolio_runs()
-        logger.info(f"[3/4] Portfolio rebalance: {r3}")
+        logger.info(f"[3/3] Portfolio rebalance: {r3}")
     except Exception as e:
-        logger.error(f"[3/4] Portfolio rebalance falló: {e}")
-
-    try:
-        r4 = dispatch_moc_and_manual_orders()
-        logger.info(f"[4/4] Order dispatch: {r4}")
-    except Exception as e:
-        logger.error(f"[4/4] Order dispatch falló: {e}")
+        logger.error(f"[3/3] Portfolio rebalance falló: {e}")
 
     return "Daily trading pipeline completed successfully."
 
@@ -255,7 +265,7 @@ def reconcile_broker_fills():
     pending_orders = Order.objects.filter(
         source="broker",
         status__in=["submitted", "accepted", "partially_filled"],
-    ).exclude(broker_order_id="").select_related("portfolio", "broker_account", "instrument")
+    ).exclude(broker_order_id="").select_related("portfolio", "broker_account", "instrument", "intent__run")
 
     dispatcher = OrderDispatcher()
     reconciled_fills = 0
@@ -297,8 +307,7 @@ def reconcile_broker_fills():
                 if created:
                     dispatcher._record_fill_bookkeeping(
                         fill=fill,
-                        portfolio=order.portfolio,
-                        broker_account=account,
+                        intent=order.intent,
                         instrument=order.instrument,
                         side=order.side,
                         qty=filled_qty,
@@ -327,6 +336,82 @@ def reconcile_broker_fills():
             logger.error(f"Error reconciling order {order.id} ({order.broker_order_id}): {e}")
 
     return f"Reconciled {reconciled_fills} fills across {len(synced_accounts)} broker accounts"
+
+
+POSITION_RECON_TOLERANCE = Decimal("0.0001")
+
+
+def diff_positions(logical: dict, broker: dict, tolerance: Decimal = POSITION_RECON_TOLERANCE) -> list:
+    """
+    Compara cantidades por símbolo entre la contabilidad lógica y el broker.
+    Devuelve [(symbol, logical_qty, broker_qty)] para cada símbolo que difiera más que la tolerancia.
+    """
+    mismatches = []
+    for symbol in sorted(set(logical) | set(broker)):
+        logical_qty = logical.get(symbol, Decimal("0"))
+        broker_qty = broker.get(symbol, Decimal("0"))
+        if abs(logical_qty - broker_qty) > tolerance:
+            mismatches.append((symbol, logical_qty, broker_qty))
+    return mismatches
+
+
+@shared_task(name="reconcile_positions_vs_broker", queue="execution")
+def reconcile_positions_vs_broker():
+    """
+    Red de seguridad post-cierre (16:10 NY): compara la suma de LogicalPosition por instrumento
+    con las posiciones reales de cada cuenta Alpaca y alerta por Telegram si difieren.
+    Solo informa; no corrige posiciones ni envía órdenes.
+    """
+    from django.db.models import Sum
+    from alpaca.trading.client import TradingClient
+    from apps.brokers.models import BrokerAccount
+    from apps.notifications.telegram import send_to_telegram
+
+    logger.info("Executing reconcile_positions_vs_broker...")
+    accounts = BrokerAccount.objects.filter(
+        provider="alpaca", execution_mode="auto", trading_enabled=True,
+    ).select_related("credential", "portfolio")
+
+    checked = 0
+    accounts_with_mismatch = 0
+
+    for account in accounts:
+        if not account.credential:
+            continue
+        creds = account.credential.get_secrets()
+        api_key = creds.get("key_id") or creds.get("api_key")
+        api_secret = creds.get("secret_key") or creds.get("secret")
+        if not api_key or not api_secret:
+            continue
+
+        try:
+            client = TradingClient(api_key, api_secret, paper=account.environment == "paper")
+            broker_qty = {p.symbol: Decimal(str(p.qty)) for p in client.get_all_positions()}
+        except Exception as e:
+            logger.error(f"Error fetching Alpaca positions for {account.display_name}: {e}")
+            continue
+
+        logical_rows = (
+            LogicalPosition.objects.filter(broker_account=account)
+            .values("instrument__symbol")
+            .annotate(total=Sum("qty"))
+        )
+        logical_qty = {r["instrument__symbol"]: r["total"] for r in logical_rows if r["total"]}
+
+        checked += 1
+        mismatches = diff_positions(logical_qty, broker_qty)
+        if mismatches:
+            accounts_with_mismatch += 1
+            lines = [
+                f"🚨 [DESCUADRE DE POSICIONES] Portafolio: {account.portfolio.name}",
+                f"Broker: {account.display_name}",
+            ]
+            for symbol, l_qty, b_qty in mismatches:
+                lines.append(f"- {symbol}: lógico {l_qty} vs broker {b_qty} (dif {b_qty - l_qty})")
+            send_to_telegram("\n".join(lines))
+            logger.warning(f"Position mismatch for {account.display_name}: {mismatches}")
+
+    return f"Checked {checked} broker accounts, {accounts_with_mismatch} with position mismatches"
 
 
 @shared_task(name="accounting_daily_snapshot", queue="accounting")

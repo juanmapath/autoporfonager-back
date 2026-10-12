@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from apps.strategies.engines.base import BaseEngine
 from apps.strategies.signals.catalog import STRATEGY_MAP
+from apps.strategies.signals.sizing import pulses_to_long_state, resolve_leverage_params, current_trade_leverage
 
 
 class SingleSignalEngine(BaseEngine):
@@ -36,6 +37,8 @@ class SingleSignalEngine(BaseEngine):
         if not strat_func:
             raise ValueError(f"Strategy function '{strategy_func_name}' not found in centralized catalog.")
 
+        base_leverage, max_leverage, use_dynamic_leverage = resolve_leverage_params(params)
+
         targets = {}
         diagnostics = {}
 
@@ -46,10 +49,21 @@ class SingleSignalEngine(BaseEngine):
 
             signals, indicators = strat_func(df, strategy_params)
             last_signal = int(signals.iloc[-1]) if not signals.empty else 0
-            
-            # Map signal to exposure: 1 -> long (scaled by weight), 0/-1 -> flat (0)
+
+            # Las estrategias emiten pulsos (1: entrada, -1: salida, 0: sin cambio): la posición se
+            # mantiene entre la entrada y la salida, igual que en el backtest.
+            long_state = pulses_to_long_state(signals)
+            is_long = bool(long_state.iloc[-1]) if not long_state.empty else False
+
+            # Apalancamiento fijado en la entrada del trade abierto (misma lógica que el backtest)
+            applied_leverage = 1.0
+            if is_long:
+                applied_leverage = current_trade_leverage(
+                    df["Close"].values, long_state.values, base_leverage, max_leverage, use_dynamic_leverage
+                )
+
             weight = instruments_weights.get(symbol, Decimal("1.0"))
-            exposure = weight if last_signal > 0 else Decimal("0.0")
+            exposure = weight * Decimal(str(round(applied_leverage, 4))) if is_long else Decimal("0.0")
             targets[symbol] = exposure
 
             # Store last indicator diagnostics (sanitize NaNs/Infs for valid PostgreSQL JSON)
@@ -66,6 +80,8 @@ class SingleSignalEngine(BaseEngine):
 
             diagnostics[symbol] = {
                 "raw_signal": last_signal,
+                "is_long": is_long,
+                "applied_leverage": round(applied_leverage, 4),
                 "exposure": str(exposure),
                 "indicators": last_ind,
             }
