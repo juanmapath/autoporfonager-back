@@ -8,11 +8,12 @@ from apps.strategies.serializers import StrategySerializer
 class AllocationSerializer(serializers.ModelSerializer):
     strategy_name = serializers.CharField(source="strategy.name", read_only=True)
     strategy_slug = serializers.CharField(source="strategy.slug", read_only=True)
+    strategy_detail = StrategySerializer(source="strategy", read_only=True)
 
     class Meta:
         model = Allocation
         fields = [
-            "id", "portfolio", "strategy", "strategy_name", "strategy_slug",
+            "id", "portfolio", "strategy", "strategy_name", "strategy_slug", "strategy_detail",
             "target_weight", "broker_account", "enabled",
         ]
         read_only_fields = ["id"]
