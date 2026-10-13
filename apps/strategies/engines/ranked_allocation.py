@@ -28,6 +28,7 @@ class RankedAllocationEngine(BaseEngine):
     Supported parameters in `params`:
       - metrics: List[{"key": str, "weight": float}]
       - rank_weights: List[float] e.g. [0.30, 0.25, 0.20, 0.15, 0.10]
+      - frozen_ranking: List[str] (optional) symbols in rank order to reuse instead of re-ranking
       - execution: {
             "mode": "hold" | "strategy",
             "strategy_name": str (optional, required if mode == "strategy"),
@@ -170,8 +171,15 @@ class RankedAllocationEngine(BaseEngine):
                 # No metrics defined -> equal score
                 composite_scores[sym] = 0.5
 
-        # 6. Sort assets by score (descending) with deterministic symbol tie-break
-        ranked_symbols = sorted(symbols, key=lambda s: (-composite_scores.get(s, 0.0), s))
+        # 6. Sort assets by score (descending) with deterministic symbol tie-break.
+        # Between rebalance dates the caller passes `frozen_ranking` (order of the last ranking) so
+        # daily price moves in the metrics do not reshuffle positions; scores are still reported.
+        frozen_ranking = params.get("frozen_ranking") or []
+        ranking_frozen = len(frozen_ranking) == n_assets and set(frozen_ranking) == set(symbols)
+        if ranking_frozen:
+            ranked_symbols = list(frozen_ranking)
+        else:
+            ranked_symbols = sorted(symbols, key=lambda s: (-composite_scores.get(s, 0.0), s))
 
         # 7. Map rank to capital weight
         assigned_capital_weights: Dict[str, Decimal] = {}
@@ -235,6 +243,7 @@ class RankedAllocationEngine(BaseEngine):
 
             diagnostics[sym] = {
                 "rank": rank_idx + 1,
+                "ranking_frozen": ranking_frozen,
                 "composite_score": round(composite_scores.get(sym, 0.0), 4),
                 "assigned_weight": str(cap_weight),
                 "applied_leverage": round(applied_lev, 4),

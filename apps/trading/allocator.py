@@ -8,6 +8,8 @@ from apps.trading.models import RebalanceRun, Target, OrderIntent
 from apps.accounting.models import LogicalPosition
 from apps.marketdata.models import LatestQuote
 from apps.strategies.models import Signal
+from apps.trading.rebalance_policy import is_periodic_rebalance_date, decide_position_trade
+from core.market_time import NY_TZ
 from core.money import quantize_qty
 
 
@@ -37,6 +39,16 @@ class PortfolioAllocator:
         intent_inst_map = {}
         processed_strategy_ids = set()
 
+        # Rebalance policy (portfolio-level): entries / exits trade every day; resizing an open
+        # position waits for a periodic rebalance date with drift above tolerance, unless the
+        # allocation weights changed since the previous run or a manual rebalance was requested.
+        is_rebalance_date = is_periodic_rebalance_date(portfolio, self.run.as_of.astimezone(NY_TZ).date())
+        force_rebalance = portfolio.rebalance_pending
+        previous_run = (
+            RebalanceRun.objects.filter(portfolio=portfolio, status__in=["executing", "done"])
+            .exclude(id=self.run.id).order_by("-as_of").first()
+        )
+
         for alloc in allocations:
             strategy = alloc.strategy
             sleeve_capital = equity * alloc.target_weight
@@ -44,6 +56,7 @@ class PortfolioAllocator:
             if not version:
                 continue
             processed_strategy_ids.add(strategy.id)
+            allocation_changed = previous_run is not None and alloc.updated_at > previous_run.as_of
 
             # Fetch latest signals for instruments in this version
             strat_instruments = version.instruments.filter(role="traded").select_related("instrument")
@@ -98,7 +111,18 @@ class PortfolioAllocator:
                         # Neutral/flat signal: KEEP accumulated shares (never sell)
                         target_shares = curr_shares
 
-                delta = target_shares - curr_shares
+                # Smart accumulators add on every buy signal by design; everything else follows
+                # the portfolio rebalance policy.
+                if strat_kind == "smart_accumulator":
+                    should_trade, reason = target_shares != curr_shares, "accumulate"
+                else:
+                    should_trade, reason = decide_position_trade(
+                        portfolio, curr_shares, target_shares, price, equity,
+                        is_rebalance_date=is_rebalance_date,
+                        allocation_changed=allocation_changed,
+                        force_rebalance=force_rebalance,
+                    )
+                delta = (target_shares - curr_shares) if should_trade else Decimal("0.0")
 
                 # Create immutable Target
                 t = Target.objects.create(
@@ -110,7 +134,7 @@ class PortfolioAllocator:
                     target_qty=target_shares,
                     current_qty=curr_shares,
                     delta_qty=delta,
-                    reason="signal_or_drift",
+                    reason=reason,
                 )
                 targets_created.append(t)
 
@@ -185,24 +209,13 @@ class PortfolioAllocator:
             netting_map[key] = netting_map.get(key, Decimal("0.0")) + delta
             intent_inst_map[key] = (broker_acc, pos.instrument)
 
-        # Generate netted OrderIntents (with rebalance band threshold: 2.5% drift or >= $25 order)
-        REBALANCE_BAND_PP = Decimal("0.025")
-        MIN_ORDER_USD = Decimal("25.00")
-
+        # Generate netted OrderIntents
         intents = []
         for (ba_id, inst_id), net_delta in netting_map.items():
             if abs(net_delta) < Decimal("0.0001"):
                 continue  # zero net delta, no trade needed
 
             broker_account, instrument = intent_inst_map[(ba_id, inst_id)]
-            lq = LatestQuote.objects.filter(instrument=instrument).first()
-            p = lq.price if lq else Decimal("100.00")
-            trade_value = abs(net_delta * p)
-
-            # Skip small churn orders unless position is being completely liquidated or initialized
-            # (trade_value < $25 and drift within rebalance band)
-            if equity > 0 and (trade_value / equity) < REBALANCE_BAND_PP and trade_value < MIN_ORDER_USD:
-                continue
 
             idempotency_key = f"run_{self.run.id}_ba_{ba_id or 'paper'}_inst_{instrument.symbol}_{uuid.uuid4().hex[:6]}"
 

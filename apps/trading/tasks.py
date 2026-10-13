@@ -59,11 +59,39 @@ def marketdata_refresh():
     svc = MarketDataService()
     instruments = Instrument.objects.filter(tradable=True)
     for inst in instruments:
-        bar_count = Bar.objects.filter(instrument=inst).count()
-        days_to_sync = 730 if bar_count < 300 else 60
-        svc.sync_bars(inst.symbol, days=days_to_sync)
+        # Historial completo la primera vez (lo exigen apalancamiento y regímenes); luego incremental.
+        svc.ensure_history(inst)
         svc.update_latest_quote(inst.symbol)
     return f"Refreshed {instruments.count()} instruments"
+
+
+def get_frozen_ranking(version, as_of_date):
+    """
+    Devuelve el orden de ranking vigente (símbolos del puesto 1 al N) de un bot ranked_allocation,
+    o None si hoy toca recalcularlo: no hay ranking previo, es fecha de rebalanceo de algún
+    portafolio activo que usa el bot, o ese portafolio tiene un rebalanceo manual pendiente.
+    """
+    from apps.strategies.models import AllocationSnapshot
+    from apps.trading.rebalance_policy import is_periodic_rebalance_date
+
+    last_snapshot = AllocationSnapshot.objects.filter(version=version).order_by("-as_of").first()
+    if not last_snapshot:
+        return None
+
+    portfolios = Portfolio.objects.filter(
+        status="active", allocations__strategy=version.strategy, allocations__enabled=True,
+    ).distinct()
+    for p in portfolios:
+        if p.rebalance_pending or is_periodic_rebalance_date(p, as_of_date):
+            return None
+
+    ranked = sorted(
+        ((d.get("rank"), sym) for sym, d in (last_snapshot.diagnostics or {}).items() if isinstance(d, dict)),
+        key=lambda item: (item[0] is None, item[0]),
+    )
+    if not ranked or any(rank is None for rank, _ in ranked):
+        return None
+    return [sym for _, sym in ranked]
 
 
 @shared_task(name="compute_regimes_and_signals", queue="signals")
@@ -72,6 +100,7 @@ def compute_regimes_and_signals():
     logger.info("Executing compute_regimes_and_signals...")
     versions = StrategyVersion.objects.filter(status="live", strategy__is_active=True).select_related("strategy")
     signals_computed = 0
+    today_ny = get_ny_now().date()
 
     for v in versions:
         strat = v.strategy
@@ -85,24 +114,19 @@ def compute_regimes_and_signals():
             sym = si.instrument.symbol
             weights[sym] = si.weight
 
-            # Auto-warmup: si el instrumento no cuenta con al menos 300 barras históricas en BD,
-            # sincronizar automáticamente 2 años (730 días) para estabilizar EMAs y SMA(200).
-            if Bar.objects.filter(instrument=si.instrument).count() < 300:
-                from apps.marketdata.services import MarketDataService
-                MarketDataService().sync_bars(sym, days=730)
+            # Auto-warmup: garantiza el historial completo disponible antes de calcular señales,
+            # para que EMAs, Z-Scores y el Profit Factor walk-forward usen todos los trades históricos.
+            if not si.instrument.full_history_synced:
+                MarketDataService().ensure_history(si.instrument, incremental=False)
 
-            bars = Bar.objects.filter(instrument=si.instrument).order_by("date")
-            if bars.exists():
+            rows = list(
+                Bar.objects.filter(instrument=si.instrument).order_by("date")
+                .values_list("date", "open", "high", "low", "close", "volume")
+            )
+            if rows:
                 import pandas as pd
-                df = pd.DataFrame([{
-                    "Date": b.date,
-                    "Open": float(b.open),
-                    "High": float(b.high),
-                    "Low": float(b.low),
-                    "Close": float(b.close),
-                    "Volume": float(b.volume),
-                } for b in bars]).set_index("Date")
-                ohlcv_dict[sym] = df
+                df = pd.DataFrame(rows, columns=["Date", "Open", "High", "Low", "Close", "Volume"]).set_index("Date")
+                ohlcv_dict[sym] = df.astype(float)
 
         if not ohlcv_dict:
             continue
@@ -113,6 +137,13 @@ def compute_regimes_and_signals():
             source_si = next((si for si in instruments if si.role == "signal_source"), None)
             if source_si:
                 engine_params["source_symbol"] = source_si.instrument.symbol
+
+        # El ranking de los bots ranked_allocation solo se recalcula en fecha de rebalanceo del
+        # portafolio; entre fechas se reutiliza el orden del último snapshot.
+        if strat.kind == "ranked_allocation":
+            frozen_ranking = get_frozen_ranking(v, today_ny)
+            if frozen_ranking:
+                engine_params["frozen_ranking"] = frozen_ranking
 
         try:
             targets, diagnostics = engine.compute_signal(ohlcv_dict, engine_params, weights)
@@ -177,6 +208,9 @@ def orchestrate_portfolio_runs():
         )
         allocator = PortfolioAllocator(run)
         intents = allocator.generate_targets_and_intents()
+        if p.rebalance_pending:
+            p.rebalance_pending = False
+            p.save(update_fields=["rebalance_pending"])
         if intents:
             run.status = "executing"
             run.save(update_fields=["status"])

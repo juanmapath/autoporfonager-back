@@ -17,6 +17,7 @@ class Instrument(TimeStampedModel):
     shortable = models.BooleanField(default=False)
     yahoo_symbol = models.CharField(max_length=32, blank=True)
     alpaca_symbol = models.CharField(max_length=32, blank=True)
+    full_history_synced = models.BooleanField(default=False, help_text="True once the full available daily history was downloaded")
 
     def save(self, *args, **kwargs):
         if not self.yahoo_symbol:

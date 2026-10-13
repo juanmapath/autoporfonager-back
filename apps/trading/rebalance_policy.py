@@ -1,77 +1,69 @@
 from datetime import date
 from decimal import Decimal
-from typing import Tuple, Dict, Any
-from apps.portfolios.models import Portfolio, Allocation
-from apps.strategies.models import Strategy
-from apps.accounting.models import LogicalPosition
-from apps.marketdata.models import LatestQuote
+from typing import Tuple
+from apps.portfolios.models import Portfolio
 from core.market_time import is_last_business_day
 
 
-def evaluate_strategy_rebalance_trigger(
-    portfolio: Portfolio,
-    allocation: Allocation,
-    as_of_date: date,
-    signal_changed: bool = False,
-    allocation_changed: bool = False,
-) -> Tuple[bool, str, Decimal]:
+def is_periodic_rebalance_date(portfolio: Portfolio, as_of_date: date) -> bool:
     """
-    Evaluates rebalancing trigger priority according to MVP section 6.2:
-    Priority 1: Allocation change pending (effective_at <= now).
-    Priority 2: Strategy signal changed.
-    Priority 3: Periodic rebalance on last business day if drift > tolerance.
-    Priority 4: Hold position.
-    
-    Returns: (should_rebalance: bool, reason: str, max_drift: Decimal)
+    True if `as_of_date` is a periodic rebalance date for the portfolio:
+    daily -> every trading day; weekly / monthly / quarterly -> last business day of the period;
+    never -> positions are only resized by signal or allocation changes.
     """
-    strategy: Strategy = allocation.strategy
-
-    # Priority 1: Allocation Change
-    if allocation_changed:
-        return True, "allocation_change", Decimal("1.0")
-
-    # Priority 2: Signal Change
-    if signal_changed:
-        return True, "signal_change", Decimal("1.0")
-
-    # Priority 3: Periodic Rebalance (daily / weekly / monthly / quarterly)
     freq = portfolio.rebalance_frequency
-    tolerance = portfolio.rebalance_tolerance
-    mode = portfolio.rebalance_tolerance_mode
-
-    if freq == "daily" or (freq in ("weekly", "monthly", "quarterly") and is_last_business_day(as_of_date, frequency=freq)):
-        # Calculate sleeve drift
-        drift = calculate_sleeve_drift(portfolio, allocation)
-        if drift > tolerance:
-            return True, f"periodic_{freq}_drift_exceeded", drift
-
-    # Priority 4: Hold
-    return False, "hold_within_tolerance", Decimal("0.0")
+    if freq == "never":
+        return False
+    return is_last_business_day(as_of_date, frequency=freq)
 
 
-def calculate_sleeve_drift(portfolio: Portfolio, allocation: Allocation) -> Decimal:
+def position_drift(current_value: Decimal, target_value: Decimal, equity: Decimal, mode: str) -> Decimal:
     """
-    Calculates drift = |current_value - target_value| / target_value
+    relative: |current - target| / target   (deviation from the position's own target)
+    absolute: |current - target| / equity   (deviation in portfolio weight points)
     """
-    # Sum current value of positions for this allocation's strategy
-    positions = LogicalPosition.objects.filter(
-        portfolio=portfolio,
-        strategy=allocation.strategy,
-    )
-    current_sleeve_val = Decimal("0.0")
-    for pos in positions:
-        lq = LatestQuote.objects.filter(instrument=pos.instrument).first()
-        price = lq.price if lq else Decimal("100.00")
-        current_sleeve_val += pos.qty * price
+    gap = abs(current_value - target_value)
+    base = target_value if mode == "relative" else equity
+    if base <= 0:
+        return Decimal("1.0") if gap > 0 else Decimal("0.0")
+    return gap / base
 
-    # Base equity estimate
-    base_equity = Decimal("100000.00")
-    if portfolio.kind == "paper":
-        base_equity = portfolio.paper_initial_capital
 
-    target_sleeve_val = base_equity * allocation.target_weight
-    if target_sleeve_val <= Decimal("0.0001"):
-        return Decimal("1.0") if current_sleeve_val > 0 else Decimal("0.0")
+def decide_position_trade(
+    portfolio: Portfolio,
+    current_qty: Decimal,
+    target_qty: Decimal,
+    price: Decimal,
+    equity: Decimal,
+    is_rebalance_date: bool,
+    allocation_changed: bool = False,
+    force_rebalance: bool = False,
+) -> Tuple[bool, str]:
+    """
+    Decides whether a sleeve position must be traded to its target on this run.
+      1. Strategy entry / exit (flat <-> invested): always, every day.
+      2. Manual rebalance requested or allocation weights changed: resize now.
+      3. Periodic rebalance date and drift above the portfolio tolerance: resize.
+      4. Otherwise hold the current quantity.
 
-    drift = abs(current_sleeve_val - target_sleeve_val) / target_sleeve_val
-    return drift
+    Returns: (should_trade, reason)
+    """
+    if current_qty == target_qty:
+        return False, "no_change"
+    if current_qty <= 0:
+        return True, "signal_entry"
+    if target_qty <= 0:
+        return True, "signal_exit"
+
+    if force_rebalance:
+        return True, "manual_rebalance"
+    if allocation_changed:
+        return True, "allocation_change"
+
+    if not is_rebalance_date:
+        return False, "hold_until_rebalance_date"
+
+    drift = position_drift(current_qty * price, target_qty * price, equity, portfolio.rebalance_tolerance_mode)
+    if drift > portfolio.rebalance_tolerance:
+        return True, f"periodic_{portfolio.rebalance_frequency}_drift_exceeded"
+    return False, "hold_within_tolerance"
