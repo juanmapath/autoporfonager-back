@@ -15,6 +15,11 @@ from apps.strategies.models import Strategy
 from apps.strategies.serializers import StrategySerializer
 
 
+def _jsonable(row: dict) -> dict:
+    """Convierte Decimals a float redondeado para la respuesta JSON."""
+    return {k: (float(round(v, 6)) if isinstance(v, Decimal) else v) for k, v in row.items()}
+
+
 class MeView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -124,30 +129,13 @@ class PortfolioViewSet(viewsets.ModelViewSet):
         if not account or not account.credential:
             return Response({"error": "No hay cuenta de broker conectada a este portafolio."}, status=status.HTTP_400_BAD_REQUEST)
 
-        from apps.brokers.providers.alpaca import test_alpaca_credentials
-        secrets = account.credential.get_secrets()
-        api_key = secrets.get("key_id")
-        secret_key = secrets.get("secret_key")
-        env = secrets.get("environment", account.environment)
+        from apps.brokers.services import sync_alpaca_account
 
         if account.provider == "alpaca":
-            res = test_alpaca_credentials(api_key, secret_key, env)
+            # El capital inicial se fija al vincular el broker; aquí sólo se refrescan saldo y movimientos.
+            res = sync_alpaca_account(account)
             if not res.get("success"):
                 return Response({"error": f"Error al sincronizar con Alpaca: {res.get('error')}"}, status=status.HTTP_400_BAD_REQUEST)
-
-            portfolio_val = res.get("portfolio_value") or res.get("cash")
-            account.managed_capital = portfolio_val
-            account.order_policy = {
-                "cash": res.get("cash"),
-                "buying_power": res.get("buying_power"),
-                "currency": res.get("currency", "USD"),
-                "status": res.get("status"),
-            }
-            account.save()
-
-            if portfolio_val and float(portfolio_val) > 0 and portfolio.kind == "paper":
-                portfolio.paper_initial_capital = portfolio_val
-                portfolio.save(update_fields=["paper_initial_capital"])
 
             return Response({
                 "success": True,
@@ -181,31 +169,59 @@ class PortfolioViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"])
     def positions(self, request, pk=None):
+        """Posiciones abiertas valoradas a precio actual, con PnL no realizado y apalancamiento."""
+        from apps.accounting.services import open_positions
         portfolio = self.get_object()
-        positions = LogicalPosition.objects.filter(portfolio=portfolio).select_related("strategy", "instrument")
-        data = [{
-            "strategy": p.strategy.name,
-            "instrument": p.instrument.symbol,
-            "qty": str(p.qty),
-            "avg_cost": str(p.avg_cost),
-            "realized_pnl": str(p.realized_pnl),
-        } for p in positions]
-        return Response(data)
+        result = open_positions(portfolio, refresh=True)
+        return Response({
+            "positions": [_jsonable(r) for r in result["positions"]],
+            "summary": _jsonable(result["summary"]),
+        })
+
+    @action(detail=True, methods=["get"], url_path="equity-history")
+    def equity_history(self, request, pk=None):
+        """Historial diario de equity y cierres de los índices de referencia (?benchmarks=SPY,QQQ)."""
+        from apps.accounting.services import equity_history, BENCHMARKS
+        portfolio = self.get_object()
+        raw = request.query_params.get("benchmarks", "SPY,QQQ")
+        symbols = [s.strip().upper() for s in raw.split(",") if s.strip()]
+        data = equity_history(portfolio, symbols)
+        return Response({
+            "portfolio": [_jsonable(p) for p in data["portfolio"]],
+            "benchmarks": {
+                sym: {"name": b["name"], "series": [_jsonable(p) for p in b["series"]]}
+                for sym, b in data["benchmarks"].items()
+            },
+            "available_benchmarks": BENCHMARKS,
+        })
 
     @action(detail=True, methods=["get"])
     def orders(self, request, pk=None):
         portfolio = self.get_object()
-        orders = Order.objects.filter(portfolio=portfolio).select_related("instrument").order_by("-created_at")[:50]
-        data = [{
-            "id": o.id,
-            "client_order_id": o.client_order_id,
-            "instrument": o.instrument.symbol,
-            "side": o.side,
-            "qty": str(o.qty),
-            "source": o.source,
-            "status": o.status,
-            "created_at": o.created_at,
-        } for o in orders]
+        orders = (
+            Order.objects.filter(portfolio=portfolio)
+            .select_related("instrument")
+            .prefetch_related("fills")
+            .order_by("-created_at")[:50]
+        )
+        data = []
+        for o in orders:
+            fills = list(o.fills.all())
+            filled_qty = sum((f.qty for f in fills), Decimal("0"))
+            avg_price = (sum((f.qty * f.fill_price for f in fills), Decimal("0")) / filled_qty) if filled_qty else None
+            data.append({
+                "id": o.id,
+                "client_order_id": o.client_order_id,
+                "instrument": o.instrument.symbol,
+                "side": o.side,
+                "qty": str(o.qty),
+                "fill_price": str(round(avg_price, 4)) if avg_price is not None else None,
+                "commission": str(sum((f.commission for f in fills), Decimal("0"))),
+                "filled_at": max((f.filled_at for f in fills), default=None),
+                "source": o.source,
+                "status": o.status,
+                "created_at": o.created_at,
+            })
         return Response(data)
 
     @action(detail=True, methods=["post"], url_path="rebalance-preview")
@@ -214,7 +230,8 @@ class PortfolioViewSet(viewsets.ModelViewSet):
         portfolio = self.get_object()
         allocs = portfolio.allocations.filter(enabled=True)
         preview_targets = []
-        equity = portfolio.paper_initial_capital if portfolio.kind == "paper" else Decimal("100000.00")
+        from apps.accounting.services import portfolio_equity
+        equity = portfolio_equity(portfolio)["equity"]
 
         for a in allocs:
             sleeve_val = equity * a.target_weight

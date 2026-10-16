@@ -14,6 +14,8 @@ from apps.trading.models import RebalanceRun
 from apps.trading.allocator import PortfolioAllocator
 from apps.trading.execution import OrderDispatcher
 from apps.accounting.models import LogicalPosition, EquitySnapshot
+from apps.accounting.services import portfolio_equity
+from apps.brokers.services import sync_alpaca_account
 from core.market_time import is_trading_day, get_ny_now
 
 logger = logging.getLogger(__name__)
@@ -199,12 +201,20 @@ def orchestrate_portfolio_runs():
             logger.info(f"Portfolio '{p.name}' (id={p.id}) ya fue rebalanceado hoy ({today_ny}). Omitiendo.")
             continue
 
+        # Dimensionar sobre el capital real: saldo del broker recién sincronizado
+        # (o contabilidad interna sin broker).
+        broker = p.broker_accounts.filter(trading_enabled=True).first()
+        if broker and broker.provider == "alpaca":
+            sync_alpaca_account(broker)
+        equity = portfolio_equity(p)
+
         run = RebalanceRun.objects.create(
             portfolio=p,
             trigger="scheduled",
             as_of=timezone.now(),
             status="planned",
-            equity_base=p.paper_initial_capital if p.kind == "paper" else Decimal("100000.00"),
+            equity_base=equity["equity"],
+            decisions={"equity_source": equity["source"]},
         )
         allocator = PortfolioAllocator(run)
         intents = allocator.generate_targets_and_intents()
@@ -450,32 +460,33 @@ def reconcile_positions_vs_broker():
 
 @shared_task(name="accounting_daily_snapshot", queue="accounting")
 def accounting_daily_snapshot():
-    """Generates daily EquitySnapshot and balances for all active portfolios."""
+    """
+    Genera el EquitySnapshot diario de cada portafolio activo. Las cuentas Alpaca se sincronizan
+    antes para que el equity sea el saldo real del broker; sin broker se usa el equity contable.
+    """
+    from apps.accounting.services import open_positions
+
     logger.info("Executing accounting_daily_snapshot...")
-    today = date.today()
+    today = get_ny_now().date()
     created = 0
 
     for port in Portfolio.objects.filter(status="active"):
-        positions_val = Decimal("0.00")
-        for pos in port.logical_positions.filter(qty__gt=0):
-            quote = LatestQuote.objects.filter(instrument=pos.instrument).first()
-            px = quote.price if quote else pos.avg_cost
-            positions_val += pos.qty * px
-
         active_broker = port.broker_accounts.filter(trading_enabled=True).first()
-        if active_broker and active_broker.managed_capital:
-            total_eq = active_broker.managed_capital
-        else:
-            total_eq = port.paper_initial_capital if port.kind == "paper" else Decimal("100000.00")
+        if active_broker and active_broker.provider == "alpaca":
+            sync_alpaca_account(active_broker)
+
+        summary = open_positions(port, refresh=True)["summary"]
+        total_eq = summary["equity"]
+        positions_val = summary["gross_exposure"]
 
         EquitySnapshot.objects.update_or_create(
             portfolio=port,
             date=today,
             defaults={
                 "total_equity": total_eq,
-                "cash_balance": max(Decimal("0.00"), total_eq - positions_val),
+                "cash_balance": total_eq - positions_val,
                 "positions_value": positions_val,
-                "source": "daily_scheduler",
+                "source": "broker" if summary["equity_source"] == "broker" else "book",
             }
         )
         created += 1

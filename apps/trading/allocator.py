@@ -29,7 +29,8 @@ class PortfolioAllocator:
         portfolio = self.portfolio
         equity = self.run.equity_base
         if equity <= 0:
-            equity = portfolio.paper_initial_capital if portfolio.kind == "paper" else Decimal("100000.00")
+            from apps.accounting.services import portfolio_equity
+            equity = portfolio_equity(portfolio)["equity"]
 
         allocations = portfolio.allocations.filter(enabled=True).select_related("strategy", "broker_account")
         targets_created = []

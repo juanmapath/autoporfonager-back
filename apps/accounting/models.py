@@ -51,6 +51,7 @@ class LedgerEntry(ImmutableModel):
     amount = models.DecimalField(max_digits=16, decimal_places=2)
     currency = models.CharField(max_length=8, default="USD")
     reference = models.CharField(max_length=128, blank=True)
+    effective_date = models.DateField(null=True, blank=True, db_index=True, help_text="Fecha en que el movimiento afecta al saldo")
 
     def __str__(self):
         return f"Ledger #{self.id} {self.portfolio.name} {self.entry_type}: ${self.amount}"

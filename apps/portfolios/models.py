@@ -118,8 +118,8 @@ class Portfolio(TimeStampedModel):
         from apps.accounting.models import LogicalPosition
         from apps.marketdata.models import LatestQuote
 
-        # Base equity estimate
-        total_equity = self.paper_initial_capital if self.kind == "paper" else Decimal("100000.00")
+        from apps.accounting.services import portfolio_equity
+        total_equity = portfolio_equity(self)["equity"]
         
         allocations = self.allocations.filter(enabled=True).select_related("strategy")
         breakdown = []

@@ -1,5 +1,41 @@
 import requests
-from typing import Dict, Any
+from datetime import date
+from typing import Dict, Any, List, Optional
+
+# Actividades no comerciales que mueven capital desde/hacia fuera de la cuenta:
+# CSD depósito, CSW retiro, JNLC journal de efectivo entre cuentas, TRANS transferencia.
+CASH_FLOW_ACTIVITY_TYPES = ("CSD", "CSW", "JNLC", "TRANS")
+
+
+def _base_url(environment: str) -> str:
+    return "https://paper-api.alpaca.markets" if environment == "paper" else "https://api.alpaca.markets"
+
+
+def get_alpaca_cash_activities(
+    api_key: str, secret_key: str, environment: str = "paper", after: Optional[date] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Descarga de /v2/account/activities los depósitos, retiros y journals de efectivo
+    (en orden cronológico, paginando con page_token). Lanza excepción si Alpaca responde con error.
+    """
+    headers = {"APCA-API-KEY-ID": api_key.strip(), "APCA-API-SECRET-KEY": secret_key.strip()}
+    params: Dict[str, Any] = {
+        "activity_types": ",".join(CASH_FLOW_ACTIVITY_TYPES),
+        "direction": "asc",
+        "page_size": 100,
+    }
+    if after:
+        params["after"] = after.isoformat()
+
+    activities: List[Dict[str, Any]] = []
+    while True:
+        res = requests.get(f"{_base_url(environment)}/v2/account/activities", headers=headers, params=params, timeout=15)
+        res.raise_for_status()
+        page = res.json() or []
+        activities.extend(page)
+        if len(page) < params["page_size"]:
+            return activities
+        params["page_token"] = page[-1]["id"]
 
 
 def test_alpaca_credentials(api_key: str, secret_key: str, environment: str = "paper") -> Dict[str, Any]:
