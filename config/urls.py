@@ -9,6 +9,7 @@ from apps.portfolios.views import MeView, PortfolioViewSet, StrategyCatalogView
 from apps.ops.views import (
     OpsOverviewView,
     OpsStrategiesView,
+    OpsStrategyCatalogView,
     OpsRecommendedPortfoliosView,
     OpsBacktestView,
     OpsKillSwitchView,
@@ -40,6 +41,7 @@ urlpatterns = [
     # Ops Admin Endpoints
     path("api/v1/ops/overview/", OpsOverviewView.as_view(), name="ops_overview"),
     path("api/v1/ops/strategies/", OpsStrategiesView.as_view(), name="ops_strategies"),
+    path("api/v1/ops/strategy-catalog/", OpsStrategyCatalogView.as_view(), name="ops_strategy_catalog"),
     path("api/v1/ops/recommended-portfolios/", OpsRecommendedPortfoliosView.as_view(), name="ops_recommended_portfolios"),
     path("api/v1/ops/backtests/", OpsBacktestView.as_view(), name="ops_backtests"),
     path("api/v1/ops/kill-switch/", OpsKillSwitchView.as_view(), name="ops_kill_switch"),

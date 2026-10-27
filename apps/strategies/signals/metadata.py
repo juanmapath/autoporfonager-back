@@ -89,6 +89,8 @@ BOT_CATALOG = {
     },
 }
 
+# "direction" es opcional en cada estrategia (default "long"). Mientras los motores operen solo en largo,
+# las estrategias "short" quedan bloqueadas para el armado de bots (ver apps/strategies/catalog_settings.py).
 STRATEGIES_CATALOG = {
     "MeanRev_BollingerBands": {
         "name": "Bollinger Bands Mean Reversion",
@@ -194,6 +196,7 @@ STRATEGIES_CATALOG = {
     "MeanRev_RegresRSIS": {
         "name": "Linear Regression + RSI Short",
         "category": "Mean Reversion",
+        "direction": "short",
         "description": "Reversión a la media en corto cuando la pendiente es negativa y RSI muestra sobrecompra.",
         "parameters": [
             {"name": "reg_period", "label": "Período Regresión", "type": "int", "default": 20, "min": 5, "max": 100},

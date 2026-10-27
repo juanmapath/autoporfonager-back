@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Strategy, StrategyVersion, StrategyInstrument, Signal, BacktestRun
+from .models import Strategy, StrategyVersion, StrategyInstrument, Signal, BacktestRun, StrategyCatalogSetting
 
 
 class StrategyInstrumentInline(admin.TabularInline):
@@ -49,3 +49,10 @@ class BacktestRunAdmin(admin.ModelAdmin):
     list_display = ("strategy_slug", "status", "initial_capital", "start_date", "end_date", "created_at")
     list_filter = ("status", "strategy_slug")
     search_fields = ("strategy_slug",)
+
+
+@admin.register(StrategyCatalogSetting)
+class StrategyCatalogSettingAdmin(admin.ModelAdmin):
+    list_display = ("strategy_name", "available_for_bots", "note", "updated_by", "updated_at")
+    list_filter = ("available_for_bots",)
+    search_fields = ("strategy_name", "note")

@@ -136,7 +136,30 @@ class BotCreateSerializer(serializers.Serializer):
                 if not strat_name:
                     raise serializers.ValidationError({"execution": "En modo 'strategy', debes especificar 'strategy_name'."})
 
+        self._validate_strategies_available(data)
         return data
+
+    def _validate_strategies_available(self, data):
+        """Rechaza estrategias bloqueadas para bots. Al reconfigurar, se permiten las que el bot ya usaba."""
+        from apps.strategies.catalog_settings import blocked_strategy_names
+
+        requested = {s.get("strategy_name") for s in data.get("strategies", [])}
+        exec_cfg = data.get("execution", {})
+        if exec_cfg.get("mode") == "strategy" and exec_cfg.get("strategy_name"):
+            requested.add(exec_cfg["strategy_name"])
+
+        already_used = set()
+        strategy = self.context.get("strategy")
+        last_ver = strategy.versions.order_by("-version").first() if strategy else None
+        if last_ver:
+            prev = last_ver.params or {}
+            already_used = {s.get("strategy_name") for s in prev.get("strategies", []) if isinstance(s, dict)}
+            if (prev.get("execution") or {}).get("strategy_name"):
+                already_used.add(prev["execution"]["strategy_name"])
+
+        blocked = sorted((requested & blocked_strategy_names()) - already_used)
+        if blocked:
+            raise serializers.ValidationError({"strategies": f"Estrategias no disponibles para armar bots: {', '.join(blocked)}."})
 
     def create(self, validated_data):
         from django.utils.text import slugify

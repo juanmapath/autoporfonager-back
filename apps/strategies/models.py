@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 from core.models import TimeStampedModel, ImmutableModel
 from apps.instruments.models import Instrument
@@ -121,3 +122,21 @@ class AllocationSnapshot(ImmutableModel):
 
     def __str__(self):
         return f"AllocationSnapshot {self.version} @ {self.as_of}"
+
+
+class StrategyCatalogSetting(TimeStampedModel):
+    """
+    Override administrable de una estrategia del catálogo (definido en código en signals/metadata.py).
+    Si no hay fila, la estrategia está disponible para armar bots (salvo las "short", ver catalog_settings).
+    El bloqueo solo aplica al armado de bots; el backtest siempre puede usar todo el catálogo.
+    """
+    strategy_name = models.CharField(max_length=64, unique=True)
+    available_for_bots = models.BooleanField(default=True)
+    note = models.CharField(max_length=255, blank=True)
+    updated_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+
+    class Meta:
+        ordering = ["strategy_name"]
+
+    def __str__(self):
+        return f"{self.strategy_name} [{'disponible' if self.available_for_bots else 'bloqueada'}]"

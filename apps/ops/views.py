@@ -52,13 +52,14 @@ class OpsStrategiesView(APIView):
     permission_classes = [permissions.IsAdminUser]
 
     def get(self, request):
-        from apps.strategies.signals.metadata import BOT_CATALOG, STRATEGIES_CATALOG
+        from apps.strategies.signals.metadata import BOT_CATALOG
+        from apps.strategies.catalog_settings import strategies_catalog_with_availability
         from apps.fundamentals.metrics import get_metrics_catalog
         strategies = Strategy.objects.all().prefetch_related("versions")
         return Response({
             "strategies": StrategySerializer(strategies, many=True).data,
             "bot_types": BOT_CATALOG,
-            "strategies_catalog": STRATEGIES_CATALOG,
+            "strategies_catalog": strategies_catalog_with_availability(),
             "metrics_catalog": get_metrics_catalog(),
         })
 
@@ -78,7 +79,7 @@ class OpsStrategiesView(APIView):
         if not strategy:
             return Response({"error": "Bot / Strategy not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        serializer = BotCreateSerializer(data=request.data)
+        serializer = BotCreateSerializer(data=request.data, context={"strategy": strategy})
         if serializer.is_valid():
             updated = serializer.reconfigure(strategy, serializer.validated_data)
             return Response(StrategySerializer(updated).data, status=status.HTTP_200_OK)
@@ -129,6 +130,35 @@ class OpsStrategiesView(APIView):
             "success": True,
             "message": f"Bot '{strat_name}' eliminado exitosamente."
         }, status=status.HTTP_200_OK)
+
+
+class OpsStrategyCatalogView(APIView):
+    """Bloqueo / desbloqueo de estrategias del catálogo para el armado de bots (el backtest no se ve afectado)."""
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        from apps.strategies.catalog_settings import strategies_catalog_with_availability
+        return Response(strategies_catalog_with_availability())
+
+    def patch(self, request):
+        from apps.strategies.models import StrategyCatalogSetting
+        from apps.strategies.catalog_settings import strategies_catalog_with_availability
+
+        name = request.data.get("strategy_name")
+        catalog = strategies_catalog_with_availability()
+        if name not in catalog:
+            return Response({"error": f"Estrategia '{name}' no existe en el catálogo."}, status=status.HTTP_404_NOT_FOUND)
+        if catalog[name]["locked"]:
+            return Response({"error": catalog[name]["blocked_reason"]}, status=status.HTTP_400_BAD_REQUEST)
+
+        setting, _ = StrategyCatalogSetting.objects.get_or_create(strategy_name=name)
+        if "available_for_bots" in request.data:
+            setting.available_for_bots = bool(request.data["available_for_bots"])
+        if "note" in request.data:
+            setting.note = str(request.data["note"] or "")[:255]
+        setting.updated_by = request.user
+        setting.save()
+        return Response(strategies_catalog_with_availability()[name])
 
 
 class OpsRecommendedPortfoliosView(APIView):
