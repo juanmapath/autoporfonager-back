@@ -124,3 +124,41 @@ class FillAllocation(ImmutableModel):
 
     def __str__(self):
         return f"FillAlloc {self.strategy.slug}: {self.allocated_qty} shares"
+
+
+class DailyPipelineRun(TimeStampedModel):
+    """
+    Estado del pipeline de cierre por día de mercado (fecha NY). Es la fuente de verdad para la
+    idempotencia de pasos, los fallbacks, el watchdog y las métricas de duración.
+    """
+    STEP_STATUS_CHOICES = (
+        ("pending", "Pending"),
+        ("running", "Running"),
+        ("done", "Done"),
+        ("failed", "Failed"),
+        ("skipped", "Skipped"),
+    )
+    STEPS = ("marketdata", "signals", "orchestration")
+
+    trade_date = models.DateField(unique=True)
+    status = models.CharField(max_length=16, choices=STEP_STATUS_CHOICES, default="pending")
+    marketdata_status = models.CharField(max_length=16, choices=STEP_STATUS_CHOICES, default="pending")
+    signals_status = models.CharField(max_length=16, choices=STEP_STATUS_CHOICES, default="pending")
+    orchestration_status = models.CharField(max_length=16, choices=STEP_STATUS_CHOICES, default="pending")
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    # {"marketdata": {"seconds": 12.3, "instruments": 40, "errors": 0},
+    #  "signals": {"seconds": 30.1, "versions": 5, "per_version": {"<slug>@v<n>": 4.2, ...}},
+    #  "orchestration": {"seconds": 3.0, "portfolios": 1},
+    #  "dispatch": {"seconds": 1.2, "orders": 7}}
+    timings = models.JSONField(default=dict, blank=True)
+    errors = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        ordering = ["-trade_date"]
+
+    def step_status(self, step: str) -> str:
+        return getattr(self, f"{step}_status")
+
+    def __str__(self):
+        return f"Pipeline {self.trade_date} [{self.status}]"
