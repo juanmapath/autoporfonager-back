@@ -186,6 +186,8 @@ CELERY_BROKER_URL = (
     or os.getenv("REDIS_INTERNAL_URL")
     or "redis://localhost:6379/1"
 )
+# Redis para locks distribuidos (core.locks); por defecto el mismo servidor que el broker de Celery
+REDIS_URL = os.getenv("REDIS_URL") or os.getenv("REDIS_INTERNAL_URL") or CELERY_BROKER_URL
 
 CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "django-cache"
