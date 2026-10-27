@@ -1,22 +1,31 @@
 import logging
+import time
 from datetime import date
 from decimal import Decimal
 from celery import shared_task
+from django.db import connection, transaction
+from django.db.models import Max, Prefetch
 from django.utils import timezone
 
 from apps.instruments.models import Instrument
-from apps.marketdata.services import MarketDataService
+from apps.marketdata.services import MarketDataService, load_daily_bars_frames
 from apps.marketdata.models import Bar, LatestQuote
-from apps.strategies.models import Strategy, StrategyVersion, Signal
+from apps.strategies.models import Strategy, StrategyVersion, StrategyInstrument, Signal
 from apps.strategies.engines import get_engine
 from apps.portfolios.models import Portfolio
-from apps.trading.models import RebalanceRun
+from apps.trading.models import RebalanceRun, OrderIntent
 from apps.trading.allocator import PortfolioAllocator
 from apps.trading.execution import OrderDispatcher
+from apps.trading.guards import skip_if_not_trading_day
+from apps.trading.universe import pipeline_universe
+from apps.trading.pipeline import (
+    get_or_create_today_pipeline, pipeline_step, record_timing, step_lock, step_skip_reason, update_pipeline,
+)
 from apps.accounting.models import LogicalPosition, EquitySnapshot
 from apps.accounting.services import portfolio_equity
 from apps.brokers.services import sync_alpaca_account
-from core.market_time import is_trading_day, get_ny_now
+from core.locks import redis_lock
+from core.market_time import get_ny_now
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +67,65 @@ def sanitize_json_for_db(val):
 def marketdata_refresh():
     """Descarga barras incrementales y LatestQuote de todos los instrumentos activos."""
     logger.info("Executing marketdata_refresh...")
+    with step_lock("marketdata") as acquired:
+        skip = step_skip_reason("marketdata", acquired, force=True)
+        if skip:
+            logger.info(skip)
+            return skip
+        return _marketdata_refresh()
+
+
+def _marketdata_refresh():
+    with pipeline_step("marketdata") as metrics:
+        # Solo el universo en uso (bots live activos + posiciones abiertas), con HTTP concurrente.
+        # Historial completo la primera vez (lo hace normalmente prewarm_market_data); luego incremental.
+        instruments = list(pipeline_universe())
+        metrics.update(MarketDataService().refresh_many(instruments))
+    return f"Refreshed {len(instruments)} instruments"
+
+
+@shared_task(name="prewarm_market_data", queue="pipeline")
+@skip_if_not_trading_day("prewarm_market_data")
+def prewarm_market_data():
+    """
+    Pre-calentamiento (15:30 NY): descarga el historial completo de los instrumentos del universo
+    que aún no lo tienen y los fundamentales que falten de los bots ranked_allocation, para que el
+    pipeline de 15:50 no haga descargas pesadas dentro de la ventana de cierre.
+    """
+    from apps.fundamentals.models import FundamentalStatement
+    from apps.fundamentals.services import ProviderChain, instruments_for_active_ranked_bots, sync_instrument
+
+    logger.info("Executing prewarm_market_data...")
     svc = MarketDataService()
-    instruments = Instrument.objects.filter(tradable=True)
-    for inst in instruments:
-        # Historial completo la primera vez (lo exigen apalancamiento y regímenes); luego incremental.
-        svc.ensure_history(inst)
-        svc.update_latest_quote(inst.symbol)
-    return f"Refreshed {instruments.count()} instruments"
+    synced, history_errors = 0, []
+    for inst in pipeline_universe().filter(full_history_synced=False):
+        if svc.ensure_history(inst, incremental=False) > 0:
+            synced += 1
+        else:
+            history_errors.append(inst.symbol)
+
+    fundamentals, fundamentals_errors = 0, []
+    missing = [
+        inst for inst in instruments_for_active_ranked_bots()
+        if not FundamentalStatement.objects.filter(instrument=inst).exists()
+    ]
+    chain = ProviderChain() if missing else None
+    for inst in missing:
+        try:
+            if sync_instrument(inst, chain).get("saved"):
+                fundamentals += 1
+            else:
+                fundamentals_errors.append(inst.symbol)
+        except Exception as e:
+            logger.error(f"Prewarm: fundamentales de {inst.symbol} fallaron: {e}")
+            fundamentals_errors.append(inst.symbol)
+
+    if history_errors or fundamentals_errors:
+        logger.warning(f"Prewarm incompleto. Historial: {history_errors}. Fundamentales: {fundamentals_errors}.")
+    return (
+        f"Prewarmed full history for {synced} instruments ({len(history_errors)} errors), "
+        f"fundamentals for {fundamentals} instruments ({len(fundamentals_errors)} errors)"
+    )
 
 
 def get_frozen_ranking(version, as_of_date):
@@ -97,142 +158,280 @@ def get_frozen_ranking(version, as_of_date):
 
 
 @shared_task(name="compute_regimes_and_signals", queue="signals")
-def compute_regimes_and_signals():
-    """Calcula régimen macro y corre compute_signals para cada versión de estrategia activa."""
+@skip_if_not_trading_day("compute_regimes_and_signals")
+def compute_regimes_and_signals(force: bool = False):
+    """
+    Calcula régimen macro y corre compute_signals para cada versión de estrategia activa.
+    Sin `force` se omite si el paso de hoy ya está `done` o `running`; nunca corren dos a la vez.
+    """
     logger.info("Executing compute_regimes_and_signals...")
-    versions = StrategyVersion.objects.filter(status="live", strategy__is_active=True).select_related("strategy")
-    signals_computed = 0
-    today_ny = get_ny_now().date()
+    with step_lock("signals") as acquired:
+        skip = step_skip_reason("signals", acquired, force)
+        if skip:
+            logger.info(skip)
+            return skip
+        return _compute_regimes_and_signals()
 
-    for v in versions:
-        strat = v.strategy
-        engine = get_engine(strat.engine)
 
-        instruments = v.instruments.all().select_related("instrument")
-        ohlcv_dict = {}
-        weights = {}
+def latest_signal_exposures(version_ids) -> dict:
+    """
+    Última target_exposure por (version_id, instrument_id) en una sola pasada (sin N+1):
+    DISTINCT ON en Postgres; en otros motores, máximo as_of por grupo + una segunda consulta.
+    """
+    base = Signal.objects.filter(version_id__in=list(version_ids))
+    if connection.vendor == "postgresql":
+        rows = (
+            base.order_by("version_id", "instrument_id", "-as_of")
+            .distinct("version_id", "instrument_id")
+            .values_list("version_id", "instrument_id", "target_exposure")
+        )
+        return {(v, i): exposure for v, i, exposure in rows}
 
-        for si in instruments:
-            sym = si.instrument.symbol
-            weights[sym] = si.weight
+    latest = {
+        (r["version_id"], r["instrument_id"]): r["max_as_of"]
+        for r in base.order_by().values("version_id", "instrument_id").annotate(max_as_of=Max("as_of"))
+    }
+    if not latest:
+        return {}
+    rows = base.filter(as_of__in=set(latest.values())).values_list("version_id", "instrument_id", "as_of", "target_exposure")
+    return {(v, i): exposure for v, i, as_of, exposure in rows if latest.get((v, i)) == as_of}
 
-            # Auto-warmup: garantiza el historial completo disponible antes de calcular señales,
-            # para que EMAs, Z-Scores y el Profit Factor walk-forward usen todos los trades históricos.
-            if not si.instrument.full_history_synced:
-                MarketDataService().ensure_history(si.instrument, incremental=False)
 
-            rows = list(
-                Bar.objects.filter(instrument=si.instrument).order_by("date")
-                .values_list("date", "open", "high", "low", "close", "volume")
+def _compute_regimes_and_signals():
+    with pipeline_step("signals") as metrics:
+        per_version = {}
+        versions = list(
+            StrategyVersion.objects.filter(status="live", strategy__is_active=True)
+            .select_related("strategy")
+            .prefetch_related(Prefetch(
+                "instruments", queryset=StrategyInstrument.objects.select_related("instrument").order_by("id"),
+            ))
+        )
+        signals_computed = 0
+        today_ny = get_ny_now().date()
+
+        # Caché de la corrida: barras de todo el universo en lote (no una lectura por bot e
+        # instrumento), últimas señales por (versión, instrumento) e instrumentos por símbolo.
+        cache_started = time.monotonic()
+        all_instruments = {si.instrument_id: si.instrument for v in versions for si in v.instruments.all()}
+        bars_cache = load_daily_bars_frames(all_instruments)
+        last_exposures = latest_signal_exposures(v.id for v in versions)
+        instruments_by_symbol = {inst.symbol: inst for inst in all_instruments.values()}
+        missing_history = sorted({inst.symbol for inst in all_instruments.values() if not inst.full_history_synced})
+        if missing_history:
+            logger.warning(
+                f"Instrumentos sin historial completo (se omiten; los descarga prewarm_market_data): {missing_history}"
             )
-            if rows:
-                import pandas as pd
-                df = pd.DataFrame(rows, columns=["Date", "Open", "High", "Low", "Close", "Volume"]).set_index("Date")
-                ohlcv_dict[sym] = df.astype(float)
+        metrics.update({"cache_seconds": round(time.monotonic() - cache_started, 3), "missing_history": missing_history})
 
-        if not ohlcv_dict:
-            continue
+        for v in versions:
+            version_started = time.monotonic()
+            strat = v.strategy
+            engine = get_engine(strat.engine)
 
-        # Los bots cross_asset guardan el activo de señales como instrumento con rol signal_source
-        engine_params = dict(v.params or {})
-        if not engine_params.get("source_symbol"):
-            source_si = next((si for si in instruments if si.role == "signal_source"), None)
-            if source_si:
-                engine_params["source_symbol"] = source_si.instrument.symbol
+            instruments = v.instruments.all()
+            ohlcv_dict = {}
+            weights = {}
 
-        # El ranking de los bots ranked_allocation solo se recalcula en fecha de rebalanceo del
-        # portafolio; entre fechas se reutiliza el orden del último snapshot.
-        if strat.kind == "ranked_allocation":
-            frozen_ranking = get_frozen_ranking(v, today_ny)
-            if frozen_ranking:
-                engine_params["frozen_ranking"] = frozen_ranking
+            for si in instruments:
+                sym = si.instrument.symbol
+                weights[sym] = si.weight
 
-        try:
-            targets, diagnostics = engine.compute_signal(ohlcv_dict, engine_params, weights)
+                # Sin historial completo, EMAs, Z-Scores y el Profit Factor walk-forward no usarían
+                # todos los trades históricos: el instrumento se omite (no se descarga en la ventana).
+                if not si.instrument.full_history_synced:
+                    continue
 
-            # For ranked_allocation bots, audit the ranking into AllocationSnapshot
+                df = bars_cache.get(si.instrument_id)
+                if df is not None:
+                    # Copia por bot: los engines no deben poder alterar el caché compartido
+                    ohlcv_dict[sym] = df.copy()
+
+            if not ohlcv_dict:
+                continue
+
+            # Los bots cross_asset guardan el activo de señales como instrumento con rol signal_source
+            engine_params = dict(v.params or {})
+            if not engine_params.get("source_symbol"):
+                source_si = next((si for si in instruments if si.role == "signal_source"), None)
+                if source_si:
+                    engine_params["source_symbol"] = source_si.instrument.symbol
+
+            # El ranking de los bots ranked_allocation solo se recalcula en fecha de rebalanceo del
+            # portafolio; entre fechas se reutiliza el orden del último snapshot.
             if strat.kind == "ranked_allocation":
-                from apps.strategies.models import AllocationSnapshot
-                AllocationSnapshot.objects.create(
-                    version=v,
-                    as_of=timezone.now(),
-                    weights={sym: str(targets.get(sym, Decimal("0.0"))) for sym in targets},
-                    diagnostics=sanitize_json_for_db(diagnostics),
-                )
+                frozen_ranking = get_frozen_ranking(v, today_ny)
+                if frozen_ranking:
+                    engine_params["frozen_ranking"] = frozen_ranking
 
-            for sym, exposure in targets.items():
-                inst = Instrument.objects.filter(symbol=sym).first()
-                if inst:
-                    last_sig = Signal.objects.filter(version=v, instrument=inst).order_by("-as_of").first()
-                    changed = (last_sig.target_exposure != exposure) if last_sig else True
-                    clean_diag = sanitize_json_for_db(diagnostics.get(sym, {}))
-                    Signal.objects.create(
+            try:
+                targets, diagnostics = engine.compute_signal(ohlcv_dict, engine_params, weights)
+
+                # For ranked_allocation bots, audit the ranking into AllocationSnapshot
+                if strat.kind == "ranked_allocation":
+                    from apps.strategies.models import AllocationSnapshot
+                    AllocationSnapshot.objects.create(
                         version=v,
-                        instrument=inst,
                         as_of=timezone.now(),
-                        target_exposure=exposure,
-                        changed=changed,
-                        diagnostics=clean_diag,
+                        weights={sym: str(targets.get(sym, Decimal("0.0"))) for sym in targets},
+                        diagnostics=sanitize_json_for_db(diagnostics),
                     )
 
-                    signals_computed += 1
-        except Exception as e:
-            logger.error(f"Error computing signal for {strat.slug} v{v.version}: {e}")
+                now = timezone.now()
+                new_signals = []
+                for sym, exposure in targets.items():
+                    inst = instruments_by_symbol.get(sym) or Instrument.objects.filter(symbol=sym).first()
+                    if inst:
+                        last_exposure = last_exposures.get((v.id, inst.id))
+                        changed = (last_exposure != exposure) if last_exposure is not None else True
+                        clean_diag = sanitize_json_for_db(diagnostics.get(sym, {}))
+                        new_signals.append(Signal(
+                            version=v,
+                            instrument=inst,
+                            as_of=now,
+                            target_exposure=exposure,
+                            changed=changed,
+                            diagnostics=clean_diag,
+                        ))
+                Signal.objects.bulk_create(new_signals)
+                signals_computed += len(new_signals)
+            except Exception as e:
+                logger.error(f"Error computing signal for {strat.slug} v{v.version}: {e}")
+            per_version[f"{strat.slug}@v{v.version}"] = round(time.monotonic() - version_started, 3)
+
+        metrics.update({"versions": len(per_version), "signals": signals_computed, "per_version": per_version})
 
     return f"Computed {signals_computed} signals"
 
 
-@shared_task(name="orchestrate_portfolio_runs", queue="execution")
-def orchestrate_portfolio_runs():
-    """Evalúa rebalanceo y genera targets e intents para portafolios activos."""
+@shared_task(name="orchestrate_portfolio_runs", queue="pipeline")
+@skip_if_not_trading_day("orchestrate_portfolio_runs")
+def orchestrate_portfolio_runs(force: bool = False):
+    """
+    Evalúa rebalanceo y genera targets e intents para portafolios activos.
+    Sin `force` se omite si el paso de hoy ya está `done` o `running`; nunca corren dos a la vez.
+    """
     logger.info("Executing orchestrate_portfolio_runs...")
-    portfolios = Portfolio.objects.filter(status="active", trading_enabled=True)
-    created_runs = 0
-    today_ny = get_ny_now().date()
+    with step_lock("orchestration") as acquired:
+        skip = step_skip_reason("orchestration", acquired, force)
+        if skip:
+            logger.info(skip)
+            return skip
+        return _orchestrate_portfolio_runs()
 
-    for p in portfolios:
-        # Idempotencia: evitar corridas duplicadas en el mismo día para el mismo portafolio
+
+def claim_scheduled_run(portfolio: Portfolio, trade_date: date):
+    """
+    Crea el RebalanceRun programado del día para el portafolio, o devuelve None si ya existe uno
+    (planned/executing/done). La fila del portafolio se bloquea con select_for_update y el chequeo
+    se repite dentro de la misma transacción: en Postgres esto serializa a dos procesos que
+    orquestan a la vez y es la garantía real contra runs (y órdenes) duplicados. El redis_lock del
+    llamador solo evita trabajo repetido (sin Redis cae a `True` y no excluye nada; SQLite ignora
+    select_for_update pero serializa las escrituras).
+    El equity se fija después, fuera de la transacción, para no sostener el bloqueo durante HTTP.
+    """
+    with transaction.atomic():
+        Portfolio.objects.select_for_update().get(pk=portfolio.pk)
         already_run = RebalanceRun.objects.filter(
-            portfolio=p,
-            as_of__date=today_ny,
-            status__in=["planned", "executing", "done"]
+            portfolio=portfolio,
+            as_of__date=trade_date,
+            trigger="scheduled",
+            status__in=["planned", "executing", "done"],
         ).exists()
         if already_run:
-            logger.info(f"Portfolio '{p.name}' (id={p.id}) ya fue rebalanceado hoy ({today_ny}). Omitiendo.")
-            continue
-
-        # Dimensionar sobre el capital real: saldo del broker recién sincronizado
-        # (o contabilidad interna sin broker).
-        broker = p.broker_accounts.filter(trading_enabled=True).first()
-        if broker and broker.provider == "alpaca":
-            sync_alpaca_account(broker)
-        equity = portfolio_equity(p)
-
-        run = RebalanceRun.objects.create(
-            portfolio=p,
+            return None
+        return RebalanceRun.objects.create(
+            portfolio=portfolio,
             trigger="scheduled",
             as_of=timezone.now(),
             status="planned",
-            equity_base=equity["equity"],
-            decisions={"equity_source": equity["source"]},
         )
-        allocator = PortfolioAllocator(run)
-        intents = allocator.generate_targets_and_intents()
-        if p.rebalance_pending:
-            p.rebalance_pending = False
-            p.save(update_fields=["rebalance_pending"])
-        if intents:
-            run.status = "executing"
-            run.save(update_fields=["status"])
-        else:
-            run.status = "done"
-            run.save(update_fields=["status"])
-        created_runs += 1
+
+
+def _orchestrate_portfolio_runs():
+    with pipeline_step("orchestration") as metrics:
+        portfolios = Portfolio.objects.filter(status="active", trading_enabled=True)
+        created_runs = 0
+        failed = []
+        today_ny = get_ny_now().date()
+
+        for p in portfolios:
+            with redis_lock(f"orchestrate:{p.id}:{today_ny}", timeout=300, blocking_timeout=1) as acquired:
+                if not acquired:
+                    logger.info(f"Portfolio '{p.name}' (id={p.id}) lo está orquestando otro proceso. Omitiendo.")
+                    continue
+
+                # Idempotencia: evitar corridas duplicadas en el mismo día para el mismo portafolio
+                run = claim_scheduled_run(p, today_ny)
+                if run is None:
+                    logger.info(f"Portfolio '{p.name}' (id={p.id}) ya fue rebalanceado hoy ({today_ny}). Omitiendo.")
+                    continue
+
+                try:
+                    # Dimensionar sobre el capital real: saldo del broker recién sincronizado
+                    # (o contabilidad interna sin broker).
+                    broker = p.broker_accounts.filter(trading_enabled=True).first()
+                    if broker and broker.provider == "alpaca":
+                        sync_alpaca_account(broker)
+                    equity = portfolio_equity(p)
+                    run.equity_base = equity["equity"]
+                    run.decisions = {"equity_source": equity["source"]}
+                    run.save(update_fields=["equity_base", "decisions"])
+
+                    allocator = PortfolioAllocator(run)
+                    intents = allocator.generate_targets_and_intents()
+                    if p.rebalance_pending:
+                        p.rebalance_pending = False
+                        p.save(update_fields=["rebalance_pending"])
+                    if intents:
+                        run.status = "executing"
+                        run.save(update_fields=["status"])
+                    else:
+                        run.status = "done"
+                        run.save(update_fields=["status"])
+                    created_runs += 1
+                except Exception as e:
+                    # El run queda `failed`: el despacho lo ignora y el fallback puede reintentarlo.
+                    logger.error(f"Orquestación falló para portafolio '{p.name}' (id={p.id}): {e}")
+                    run.status = "failed"
+                    run.save(update_fields=["status"])
+                    failed.append(f"{p.id}: {type(e).__name__}: {e}")
+
+        metrics.update({"portfolios": portfolios.count(), "runs": created_runs, "failed": len(failed)})
+        if failed:
+            raise RuntimeError(f"Orquestación falló en {len(failed)} portafolio(s): {'; '.join(failed)}")
 
     return f"Orchestrated {created_runs} portfolio runs"
 
 
+def dispatch_pending_intent(dispatcher: OrderDispatcher, intent_id: int) -> bool:
+    """
+    Despacha un intent solo si sigue `pending`, re-leyéndolo con select_for_update dentro de una
+    transacción: dos despachos concurrentes nunca envían el mismo intent (el segundo lo ve
+    `dispatched`/`cancelled` y lo omite). El client_order_id = idempotency_key sigue protegiendo
+    del lado de Alpaca. Los errores del envío se capturan dentro de la transacción para conservar
+    los estados que fija el dispatcher (p. ej. cancelled + missed_cutoff). True si se despachó.
+    """
+    with transaction.atomic():
+        intent = (
+            # of=("self",): Postgres no admite FOR UPDATE sobre el lado nulable del join (broker_account)
+            OrderIntent.objects.select_for_update(of=("self",))
+            .select_related("run__portfolio", "broker_account", "instrument")
+            .get(pk=intent_id)
+        )
+        if intent.status != "pending":
+            logger.info(f"Intent {intent_id} ya está {intent.status}: lo despachó otro proceso. Omitiendo.")
+            return False
+        try:
+            dispatcher.dispatch_intent(intent)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to dispatch intent {intent_id}: {e}")
+            return False
+
+
 @shared_task(name="dispatch_moc_and_manual_orders", queue="execution")
+@skip_if_not_trading_day("dispatch_moc_and_manual_orders")
 def dispatch_moc_and_manual_orders():
     """
     Despacho (15:57 NY): envía órdenes de mercado DAY (admiten fracciones) a Alpaca y genera
@@ -240,27 +439,30 @@ def dispatch_moc_and_manual_orders():
     con los schedules ya registrados; ya no se usan órdenes MOC.
     """
     logger.info("Executing dispatch_moc_and_manual_orders...")
+    started = time.monotonic()
     active_runs = RebalanceRun.objects.filter(status="executing")
     dispatcher = OrderDispatcher()
     dispatched_count = 0
 
     for run in active_runs:
-        for intent in run.intents.filter(status="pending"):
-            try:
-                dispatcher.dispatch_intent(intent)
+        for intent_id in list(run.intents.filter(status="pending").values_list("id", flat=True)):
+            if dispatch_pending_intent(dispatcher, intent_id):
                 dispatched_count += 1
-            except Exception as e:
-                logger.error(f"Failed to dispatch intent {intent.id}: {e}")
         # No pisar estados terminales fijados durante el despacho (p. ej. missed_cutoff)
         run.refresh_from_db(fields=["status"])
         if run.status == "executing":
             run.status = "done"
             run.save(update_fields=["status"])
 
+    try:
+        record_timing("dispatch", {"seconds": round(time.monotonic() - started, 3), "orders": dispatched_count})
+    except Exception as e:
+        logger.error(f"No se pudo registrar la métrica de despacho: {e}")
     return f"Dispatched {dispatched_count} orders"
 
 
-@shared_task(name="run_daily_trading_pipeline", queue="execution")
+@shared_task(name="run_daily_trading_pipeline", queue="pipeline")
+@skip_if_not_trading_day("run_daily_trading_pipeline")
 def run_daily_trading_pipeline():
     """
     Cadena de preparación (15:50 NY):
@@ -272,6 +474,14 @@ def run_daily_trading_pipeline():
     para ejecutar lo más cerca posible del cierre con órdenes de mercado DAY.
     """
     logger.info(">>> [PIPELINE 15:50 NY] Iniciando pipeline automatizado consecutivo...")
+    trade_date = get_ny_now().date()
+
+    def mark_started(run):
+        run.status = "running"
+        run.started_at = timezone.now()
+        run.finished_at = None
+
+    update_pipeline(trade_date, mark_started)
     try:
         r1 = marketdata_refresh()
         logger.info(f"[1/3] Market data refresh: {r1}")
@@ -290,10 +500,129 @@ def run_daily_trading_pipeline():
     except Exception as e:
         logger.error(f"[3/3] Portfolio rebalance falló: {e}")
 
+    def mark_finished(run):
+        steps_ok = all(run.step_status(step) == "done" for step in run.STEPS)
+        run.status = "done" if steps_ok else "failed"
+        run.finished_at = timezone.now()
+
+    update_pipeline(trade_date, mark_finished)
     return "Daily trading pipeline completed successfully."
 
 
+@shared_task(name="fallback_compute_signals", queue="pipeline")
+@skip_if_not_trading_day("fallback_compute_signals")
+def fallback_compute_signals():
+    """
+    Respaldo programado (15:52 NY) del paso de señales: solo corre si el paso de hoy está
+    `pending` o `failed`; si el pipeline ya lo terminó o lo está corriendo, se omite.
+    """
+    status = get_or_create_today_pipeline().signals_status
+    if status in ("done", "running"):
+        msg = f"Skipped: signals already {status} today"
+        logger.info(f"[FALLBACK señales] {msg}")
+        return msg
+    logger.warning(f"[FALLBACK señales] El paso de señales está '{status}'. Ejecutando respaldo.")
+    return compute_regimes_and_signals()
+
+
+@shared_task(name="fallback_orchestrate", queue="pipeline")
+@skip_if_not_trading_day("fallback_orchestrate")
+def fallback_orchestrate():
+    """
+    Respaldo programado (15:53 NY) de la orquestación: solo corre si el paso de hoy está
+    `pending` o `failed`. Si las señales de hoy no quedaron `done`, avisa por Telegram que el
+    rebalanceo usará las últimas señales disponibles (no actualizadas) y continúa, como hasta ahora.
+    """
+    from apps.notifications.telegram import send_to_telegram
+
+    run = get_or_create_today_pipeline()
+    if run.orchestration_status in ("done", "running"):
+        msg = f"Skipped: orchestration already {run.orchestration_status} today"
+        logger.info(f"[FALLBACK orquestación] {msg}")
+        return msg
+    if run.signals_status != "done":
+        send_to_telegram(
+            f"⚠️ [PIPELINE {run.trade_date}] Rebalanceo con señales no actualizadas: el paso de señales "
+            f"está '{run.signals_status}'. La orquestación de respaldo usará las últimas señales disponibles."
+        )
+    logger.warning(f"[FALLBACK orquestación] El paso de orquestación está '{run.orchestration_status}'. Ejecutando respaldo.")
+    return orchestrate_portfolio_runs()
+
+
+def escape_markdown(text: str) -> str:
+    """Escapa los caracteres de Markdown de Telegram para textos con nombres de pasos o errores."""
+    for ch in ("\\", "_", "*", "`", "["):
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
+@shared_task(name="pipeline_watchdog", queue="celery")
+@skip_if_not_trading_day("pipeline_watchdog")
+def pipeline_watchdog():
+    """
+    Watchdog (15:56 NY, antes del despacho de 15:57): si el pipeline de hoy no terminó (`done`),
+    avisa por Telegram con el estado y la duración de cada paso y el tiempo transcurrido.
+    """
+    from apps.notifications.telegram import send_to_telegram
+    from apps.trading.models import DailyPipelineRun
+
+    today = get_ny_now().date()
+    run = DailyPipelineRun.objects.filter(trade_date=today).first()
+    if run and run.status == "done":
+        return "Pipeline OK"
+
+    if not run:
+        lines = [f"🚨 [PIPELINE {today}] No arrancó: no hay registro del pipeline a las 15:56 NY."]
+    else:
+        lines = [f"🚨 [PIPELINE {today}] No terminó a tiempo (estado: {run.status})."]
+        if run.started_at:
+            elapsed = (timezone.now() - run.started_at).total_seconds()
+            lines.append(f"Transcurrido desde el inicio: {elapsed:.0f} s")
+        for step in DailyPipelineRun.STEPS:
+            seconds = (run.timings or {}).get(step, {}).get("seconds")
+            duration = f" ({seconds:.1f} s)" if seconds is not None else ""
+            lines.append(f"- {step}: {run.step_status(step)}{duration}")
+        for err in (run.errors or [])[-3:]:
+            lines.append(f"Error en {err.get('step')}: {err.get('error')}")
+    send_to_telegram(escape_markdown("\n".join(lines)))
+    return "Alert sent"
+
+
+@shared_task(name="pipeline_post_cutoff_check", queue="celery")
+@skip_if_not_trading_day("pipeline_post_cutoff_check")
+def pipeline_post_cutoff_check():
+    """
+    Chequeo post-corte (16:01 NY): avisa por Telegram si hoy hay RebalanceRun en `missed_cutoff`
+    o intents que siguen `pending` (no se enviaron antes del corte).
+    """
+    from apps.notifications.telegram import send_to_telegram
+
+    today = get_ny_now().date()
+    missed = list(
+        RebalanceRun.objects.filter(as_of__date=today, status="missed_cutoff")
+        .select_related("portfolio").values_list("id", "portfolio__name")
+    )
+    pending = list(
+        OrderIntent.objects.filter(run__as_of__date=today, status="pending")
+        .select_related("instrument", "run__portfolio")
+        .values_list("id", "instrument__symbol", "run__portfolio__name")
+    )
+    if not missed and not pending:
+        return "Post-cutoff OK"
+
+    lines = [f"🚨 [POST-CORTE {today}] Revisión de órdenes de hoy:"]
+    for run_id, portfolio_name in missed:
+        lines.append(f"- Run #{run_id} ({portfolio_name}): missed_cutoff")
+    if pending:
+        lines.append(f"Intents sin enviar: {len(pending)}")
+        for intent_id, symbol, portfolio_name in pending[:10]:
+            lines.append(f"- Intent #{intent_id} {symbol} ({portfolio_name})")
+    send_to_telegram(escape_markdown("\n".join(lines)))
+    return f"Alert sent: {len(missed)} missed_cutoff runs, {len(pending)} pending intents"
+
+
 @shared_task(name="reconcile_broker_fills", queue="execution")
+@skip_if_not_trading_day("reconcile_broker_fills")
 def reconcile_broker_fills():
     """
     Reconciliación post-mercado (16:05 NY):
@@ -400,6 +729,7 @@ def diff_positions(logical: dict, broker: dict, tolerance: Decimal = POSITION_RE
 
 
 @shared_task(name="reconcile_positions_vs_broker", queue="execution")
+@skip_if_not_trading_day("reconcile_positions_vs_broker")
 def reconcile_positions_vs_broker():
     """
     Red de seguridad post-cierre (16:10 NY): compara la suma de LogicalPosition por instrumento
@@ -459,6 +789,7 @@ def reconcile_positions_vs_broker():
 
 
 @shared_task(name="accounting_daily_snapshot", queue="accounting")
+@skip_if_not_trading_day("accounting_daily_snapshot")
 def accounting_daily_snapshot():
     """
     Genera el EquitySnapshot diario de cada portafolio activo. Las cuentas Alpaca se sincronizan

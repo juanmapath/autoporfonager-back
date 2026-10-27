@@ -21,7 +21,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    command: celery -A config worker -l info -Q default,marketdata,signals
+    command: celery -A config worker -n main@%h -l info -Q celery,pipeline,marketdata,signals,accounting --prefetch-multiplier=1
     volumes:
       - ..:/app
     environment:
@@ -36,7 +36,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    command: celery -A config worker -l info -Q execution -c 4
+    # Reservado al despacho y conciliaciones: nunca comparte slots con el pipeline
+    command: celery -A config worker -n exec@%h -l info -Q execution -c 1 --prefetch-multiplier=1
     volumes:
       - ..:/app
     environment:

@@ -186,12 +186,19 @@ CELERY_BROKER_URL = (
     or os.getenv("REDIS_INTERNAL_URL")
     or "redis://localhost:6379/1"
 )
+# Redis para locks distribuidos (core.locks); por defecto el mismo servidor que el broker de Celery
+REDIS_URL = os.getenv("REDIS_URL") or os.getenv("REDIS_INTERNAL_URL") or CELERY_BROKER_URL
 
 CELERY_RESULT_BACKEND = "django-db"
 CELERY_CACHE_BACKEND = "django-cache"
 CELERY_TIMEZONE = "America/New_York"
 CELERY_ENABLE_UTC = True
 CELERY_TASK_TRACK_STARTED = True
+# Cada worker reserva una sola tarea a la vez: el despacho de 15:57 no queda retenido en el buffer
+# de un proceso ocupado con el pipeline. No se activa task_acks_late a propósito: con Redis, una
+# tarea de un worker caído se re-entrega tras visibility_timeout (1 h), es decir fuera de la
+# ventana de cierre; reintentarla tarde es peor que el aviso del watchdog de 15:56.
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 
 # Encryption & Master Secrets
 MASTER_ENCRYPTION_KEY = os.getenv("MASTER_ENCRYPTION_KEY", "dGhpcy1pcy1hLXRlc3QtZmVybmV0LWtleS0zMmJ5dGVzPT0=")
@@ -204,6 +211,11 @@ TELEGRAM_ALERT_CHAT_ID = os.getenv("TELEGRAM_ALERT_CHAT_ID", "")
 ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
 ALPACA_PAPER = os.getenv("ALPACA_PAPER", "True").lower() in ("true", "1", "yes")
+
+# Paso ① del pipeline (marketdata_refresh): descargas HTTP concurrentes y presupuesto total del paso;
+# al vencer, los instrumentos restantes se registran como error y el pipeline continúa.
+MARKETDATA_MAX_WORKERS = int(os.getenv("MARKETDATA_MAX_WORKERS", "8"))
+MARKETDATA_STEP_BUDGET_SECONDS = int(os.getenv("MARKETDATA_STEP_BUDGET_SECONDS", "150"))
 
 # Yahoo Provider
 YAHOO_USE_CURL_CFFI = os.getenv("YAHOO_USE_CURL_CFFI", "False").lower() in ("true", "1", "yes")

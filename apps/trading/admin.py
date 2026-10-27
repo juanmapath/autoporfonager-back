@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import RebalanceRun, Target, OrderIntent, Order, Fill, FillAllocation
+from .models import RebalanceRun, Target, OrderIntent, Order, Fill, FillAllocation, DailyPipelineRun
 
 
 class TargetInline(admin.TabularInline):
@@ -34,3 +34,19 @@ class FillAdmin(admin.ModelAdmin):
     list_display = ("id", "order", "fill_price", "qty", "commission", "source", "filled_at")
     list_filter = ("source",)
     search_fields = ("order__client_order_id", "order__instrument__symbol")
+
+
+@admin.register(DailyPipelineRun)
+class DailyPipelineRunAdmin(admin.ModelAdmin):
+    list_display = ("trade_date", "status", "marketdata_status", "signals_status", "orchestration_status", "started_at", "finished_at")
+    list_filter = ("status",)
+    readonly_fields = [f.name for f in DailyPipelineRun._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

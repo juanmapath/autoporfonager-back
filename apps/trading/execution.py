@@ -49,15 +49,16 @@ class OrderDispatcher:
         """
         now_ny = get_ny_now()
         window = get_decision_window(now_ny.date())
-        if window:
-            _, cutoff = window
-            if now_ny > cutoff:
-                intent.status = "cancelled"
-                intent.save(update_fields=["status"])
-                intent.run.status = "missed_cutoff"
-                intent.run.save(update_fields=["status"])
-                send_to_telegram(f"🚨 [MISSED CUTOFF] Orden cancelada para {intent.instrument.symbol}. Superado corte de envío antes del cierre.")
-                raise RuntimeError("Dispatch cutoff before market close passed. Order rejected for safety.")
+        # Sin ventana (feriado o fin de semana) se rechaza igual que tras el corte: una orden DAY
+        # quedaría encolada en Alpaca para la apertura de la siguiente sesión.
+        if window is None or now_ny > window[1]:
+            reason = "Superado corte de envío antes del cierre." if window else "Hoy no hay sesión NYSE (sin ventana de decisión)."
+            intent.status = "cancelled"
+            intent.save(update_fields=["status"])
+            intent.run.status = "missed_cutoff"
+            intent.run.save(update_fields=["status"])
+            send_to_telegram(f"🚨 [MISSED CUTOFF] Orden cancelada para {intent.instrument.symbol}. {reason}")
+            raise RuntimeError(f"Order rejected for safety: {reason}")
 
         order = Order.objects.create(
             intent=intent,

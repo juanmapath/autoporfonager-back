@@ -20,8 +20,20 @@ class Command(BaseCommand):
         PeriodicTask.objects.filter(name__startswith="[5/5]").delete()
         # Replaced by the 15:57 dispatch; left enabled it would send orders at 15:55.
         PeriodicTask.objects.filter(name="[4/6] Fallback: Order Dispatch (Alpaca & Simulated)").delete()
+        # Fallbacks incondicionales reemplazados por fallback_compute_signals / fallback_orchestrate,
+        # que solo corren si el paso de hoy quedó pendiente o falló.
+        PeriodicTask.objects.filter(name="[2/6] Fallback: Compute Quantitative Signals").delete()
+        PeriodicTask.objects.filter(name="[3/6] Fallback: Portfolio Rebalance & Allocation Orchestration").delete()
 
         schedules_def = [
+            {
+                "name": "[Prewarm] Market Data Full History & Fundamentals",
+                "task": "prewarm_market_data",
+                "minute": "30",
+                "hour": "15",
+                "day_of_week": "1-5",  # Mon-Fri
+                "description": "Pre-calentamiento a las 15:30 NY: historial completo de instrumentos nuevos del universo y fundamentales faltantes, fuera de la ventana de cierre.",
+            },
             {
                 "name": "[1/6] Daily Algorithmic Trading Pipeline",
                 "task": "run_daily_trading_pipeline",
@@ -31,20 +43,28 @@ class Command(BaseCommand):
                 "description": "Pipeline de preparación (15:50 NY): descarga market data, genera señales y rebalancea carteras. Las órdenes se envían a las 15:57 NY.",
             },
             {
-                "name": "[2/6] Fallback: Compute Quantitative Signals",
-                "task": "compute_regimes_and_signals",
+                "name": "[2/6] Conditional Fallback: Compute Quantitative Signals",
+                "task": "fallback_compute_signals",
                 "minute": "52",
                 "hour": "15",
                 "day_of_week": "1-5",  # Mon-Fri
-                "description": "Respaldo automático a las 15:52 NY en caso de retraso o fallo en la descarga previa.",
+                "description": "Respaldo a las 15:52 NY: recalcula señales solo si el paso de hoy quedó pendiente o falló (se omite si está hecho o en curso).",
             },
             {
-                "name": "[3/6] Fallback: Portfolio Rebalance & Allocation Orchestration",
-                "task": "orchestrate_portfolio_runs",
+                "name": "[3/6] Conditional Fallback: Portfolio Rebalance & Allocation Orchestration",
+                "task": "fallback_orchestrate",
                 "minute": "53",
                 "hour": "15",
                 "day_of_week": "1-5",  # Mon-Fri
-                "description": "Respaldo automático a las 15:53 NY: genera rebalanceos para cualquier cartera pendiente hoy.",
+                "description": "Respaldo a las 15:53 NY: orquesta solo si el paso de hoy quedó pendiente o falló; avisa por Telegram si las señales no están actualizadas.",
+            },
+            {
+                "name": "[Watchdog] Daily Pipeline Completion Check",
+                "task": "pipeline_watchdog",
+                "minute": "56",
+                "hour": "15",
+                "day_of_week": "1-5",  # Mon-Fri
+                "description": "Watchdog a las 15:56 NY: alerta por Telegram si el pipeline de hoy no terminó, con el estado y la duración de cada paso.",
             },
             {
                 "name": "[4/6] Order Dispatch (Alpaca Market DAY & Simulated)",
@@ -53,6 +73,14 @@ class Command(BaseCommand):
                 "hour": "15",
                 "day_of_week": "1-5",  # Mon-Fri
                 "description": "Envío de órdenes a las 15:57 NY: órdenes de mercado DAY (admiten fracciones) justo antes del cierre.",
+            },
+            {
+                "name": "[Watchdog] Post-Cutoff Missed Orders Check",
+                "task": "pipeline_post_cutoff_check",
+                "minute": "01",
+                "hour": "16",
+                "day_of_week": "1-5",  # Mon-Fri
+                "description": "Chequeo a las 16:01 NY: alerta por Telegram si hoy hay rebalanceos en missed_cutoff o intents sin enviar.",
             },
             {
                 "name": "[5/6] Post-Close Broker Fills & Trade Reconciliation",
