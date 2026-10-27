@@ -222,7 +222,7 @@ def _compute_regimes_and_signals():
     return f"Computed {signals_computed} signals"
 
 
-@shared_task(name="orchestrate_portfolio_runs", queue="execution")
+@shared_task(name="orchestrate_portfolio_runs", queue="pipeline")
 @skip_if_not_trading_day("orchestrate_portfolio_runs")
 def orchestrate_portfolio_runs(force: bool = False):
     """
@@ -379,7 +379,7 @@ def dispatch_moc_and_manual_orders():
     return f"Dispatched {dispatched_count} orders"
 
 
-@shared_task(name="run_daily_trading_pipeline", queue="execution")
+@shared_task(name="run_daily_trading_pipeline", queue="pipeline")
 @skip_if_not_trading_day("run_daily_trading_pipeline")
 def run_daily_trading_pipeline():
     """
@@ -427,7 +427,7 @@ def run_daily_trading_pipeline():
     return "Daily trading pipeline completed successfully."
 
 
-@shared_task(name="fallback_compute_signals", queue="execution")
+@shared_task(name="fallback_compute_signals", queue="pipeline")
 @skip_if_not_trading_day("fallback_compute_signals")
 def fallback_compute_signals():
     """
@@ -443,7 +443,7 @@ def fallback_compute_signals():
     return compute_regimes_and_signals()
 
 
-@shared_task(name="fallback_orchestrate", queue="execution")
+@shared_task(name="fallback_orchestrate", queue="pipeline")
 @skip_if_not_trading_day("fallback_orchestrate")
 def fallback_orchestrate():
     """
@@ -465,6 +465,78 @@ def fallback_orchestrate():
         )
     logger.warning(f"[FALLBACK orquestación] El paso de orquestación está '{run.orchestration_status}'. Ejecutando respaldo.")
     return orchestrate_portfolio_runs()
+
+
+def escape_markdown(text: str) -> str:
+    """Escapa los caracteres de Markdown de Telegram para textos con nombres de pasos o errores."""
+    for ch in ("\\", "_", "*", "`", "["):
+        text = text.replace(ch, "\\" + ch)
+    return text
+
+
+@shared_task(name="pipeline_watchdog", queue="celery")
+@skip_if_not_trading_day("pipeline_watchdog")
+def pipeline_watchdog():
+    """
+    Watchdog (15:56 NY, antes del despacho de 15:57): si el pipeline de hoy no terminó (`done`),
+    avisa por Telegram con el estado y la duración de cada paso y el tiempo transcurrido.
+    """
+    from apps.notifications.telegram import send_to_telegram
+    from apps.trading.models import DailyPipelineRun
+
+    today = get_ny_now().date()
+    run = DailyPipelineRun.objects.filter(trade_date=today).first()
+    if run and run.status == "done":
+        return "Pipeline OK"
+
+    if not run:
+        lines = [f"🚨 [PIPELINE {today}] No arrancó: no hay registro del pipeline a las 15:56 NY."]
+    else:
+        lines = [f"🚨 [PIPELINE {today}] No terminó a tiempo (estado: {run.status})."]
+        if run.started_at:
+            elapsed = (timezone.now() - run.started_at).total_seconds()
+            lines.append(f"Transcurrido desde el inicio: {elapsed:.0f} s")
+        for step in DailyPipelineRun.STEPS:
+            seconds = (run.timings or {}).get(step, {}).get("seconds")
+            duration = f" ({seconds:.1f} s)" if seconds is not None else ""
+            lines.append(f"- {step}: {run.step_status(step)}{duration}")
+        for err in (run.errors or [])[-3:]:
+            lines.append(f"Error en {err.get('step')}: {err.get('error')}")
+    send_to_telegram(escape_markdown("\n".join(lines)))
+    return "Alert sent"
+
+
+@shared_task(name="pipeline_post_cutoff_check", queue="celery")
+@skip_if_not_trading_day("pipeline_post_cutoff_check")
+def pipeline_post_cutoff_check():
+    """
+    Chequeo post-corte (16:01 NY): avisa por Telegram si hoy hay RebalanceRun en `missed_cutoff`
+    o intents que siguen `pending` (no se enviaron antes del corte).
+    """
+    from apps.notifications.telegram import send_to_telegram
+
+    today = get_ny_now().date()
+    missed = list(
+        RebalanceRun.objects.filter(as_of__date=today, status="missed_cutoff")
+        .select_related("portfolio").values_list("id", "portfolio__name")
+    )
+    pending = list(
+        OrderIntent.objects.filter(run__as_of__date=today, status="pending")
+        .select_related("instrument", "run__portfolio")
+        .values_list("id", "instrument__symbol", "run__portfolio__name")
+    )
+    if not missed and not pending:
+        return "Post-cutoff OK"
+
+    lines = [f"🚨 [POST-CORTE {today}] Revisión de órdenes de hoy:"]
+    for run_id, portfolio_name in missed:
+        lines.append(f"- Run #{run_id} ({portfolio_name}): missed_cutoff")
+    if pending:
+        lines.append(f"Intents sin enviar: {len(pending)}")
+        for intent_id, symbol, portfolio_name in pending[:10]:
+            lines.append(f"- Intent #{intent_id} {symbol} ({portfolio_name})")
+    send_to_telegram(escape_markdown("\n".join(lines)))
+    return f"Alert sent: {len(missed)} missed_cutoff runs, {len(pending)} pending intents"
 
 
 @shared_task(name="reconcile_broker_fills", queue="execution")

@@ -192,6 +192,11 @@ CELERY_CACHE_BACKEND = "django-cache"
 CELERY_TIMEZONE = "America/New_York"
 CELERY_ENABLE_UTC = True
 CELERY_TASK_TRACK_STARTED = True
+# Cada worker reserva una sola tarea a la vez: el despacho de 15:57 no queda retenido en el buffer
+# de un proceso ocupado con el pipeline. No se activa task_acks_late a propósito: con Redis, una
+# tarea de un worker caído se re-entrega tras visibility_timeout (1 h), es decir fuera de la
+# ventana de cierre; reintentarla tarde es peor que el aviso del watchdog de 15:56.
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 
 # Encryption & Master Secrets
 MASTER_ENCRYPTION_KEY = os.getenv("MASTER_ENCRYPTION_KEY", "dGhpcy1pcy1hLXRlc3QtZmVybmV0LWtleS0zMmJ5dGVzPT0=")

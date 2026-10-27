@@ -51,12 +51,28 @@ class Command(BaseCommand):
                 "description": "Respaldo a las 15:53 NY: orquesta solo si el paso de hoy quedó pendiente o falló; avisa por Telegram si las señales no están actualizadas.",
             },
             {
+                "name": "[Watchdog] Daily Pipeline Completion Check",
+                "task": "pipeline_watchdog",
+                "minute": "56",
+                "hour": "15",
+                "day_of_week": "1-5",  # Mon-Fri
+                "description": "Watchdog a las 15:56 NY: alerta por Telegram si el pipeline de hoy no terminó, con el estado y la duración de cada paso.",
+            },
+            {
                 "name": "[4/6] Order Dispatch (Alpaca Market DAY & Simulated)",
                 "task": "dispatch_moc_and_manual_orders",
                 "minute": "57",
                 "hour": "15",
                 "day_of_week": "1-5",  # Mon-Fri
                 "description": "Envío de órdenes a las 15:57 NY: órdenes de mercado DAY (admiten fracciones) justo antes del cierre.",
+            },
+            {
+                "name": "[Watchdog] Post-Cutoff Missed Orders Check",
+                "task": "pipeline_post_cutoff_check",
+                "minute": "01",
+                "hour": "16",
+                "day_of_week": "1-5",  # Mon-Fri
+                "description": "Chequeo a las 16:01 NY: alerta por Telegram si hoy hay rebalanceos en missed_cutoff o intents sin enviar.",
             },
             {
                 "name": "[5/6] Post-Close Broker Fills & Trade Reconciliation",
