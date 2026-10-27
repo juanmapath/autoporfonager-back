@@ -196,6 +196,34 @@ class PortfolioViewSet(viewsets.ModelViewSet):
         })
 
     @action(detail=True, methods=["get"])
+    def contributions(self, request, pk=None):
+        """Aportes a la cuenta: el capital inicial como primer aporte, seguido de depósitos y retiros."""
+        from apps.accounting.models import LedgerEntry
+        from apps.accounting.services import CASH_FLOW_TYPES
+        portfolio = self.get_object()
+        entries = LedgerEntry.objects.filter(
+            portfolio=portfolio, entry_type__in=CASH_FLOW_TYPES
+        ).order_by("effective_date", "created_at")
+
+        rows = [{
+            "id": "initial",
+            "date": portfolio.created_at.date(),
+            "type": "initial",
+            "amount": float(portfolio.paper_initial_capital),
+            "reference": "Capital inicial",
+        }]
+        for e in entries:
+            rows.append({
+                "id": e.id,
+                "date": e.effective_date or e.created_at.date(),
+                "type": e.entry_type,
+                "amount": float(e.amount),
+                "reference": e.reference,
+            })
+        total = sum(r["amount"] for r in rows)
+        return Response({"contributions": rows, "total": round(total, 2)})
+
+    @action(detail=True, methods=["get"])
     def orders(self, request, pk=None):
         portfolio = self.get_object()
         orders = (
