@@ -210,6 +210,11 @@ ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "")
 ALPACA_API_SECRET = os.getenv("ALPACA_API_SECRET", "")
 ALPACA_PAPER = os.getenv("ALPACA_PAPER", "True").lower() in ("true", "1", "yes")
 
+# Paso ① del pipeline (marketdata_refresh): descargas HTTP concurrentes y presupuesto total del paso;
+# al vencer, los instrumentos restantes se registran como error y el pipeline continúa.
+MARKETDATA_MAX_WORKERS = int(os.getenv("MARKETDATA_MAX_WORKERS", "8"))
+MARKETDATA_STEP_BUDGET_SECONDS = int(os.getenv("MARKETDATA_STEP_BUDGET_SECONDS", "150"))
+
 # Yahoo Provider
 YAHOO_USE_CURL_CFFI = os.getenv("YAHOO_USE_CURL_CFFI", "False").lower() in ("true", "1", "yes")
 

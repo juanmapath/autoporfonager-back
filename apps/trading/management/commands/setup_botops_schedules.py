@@ -27,6 +27,14 @@ class Command(BaseCommand):
 
         schedules_def = [
             {
+                "name": "[Prewarm] Market Data Full History & Fundamentals",
+                "task": "prewarm_market_data",
+                "minute": "30",
+                "hour": "15",
+                "day_of_week": "1-5",  # Mon-Fri
+                "description": "Pre-calentamiento a las 15:30 NY: historial completo de instrumentos nuevos del universo y fundamentales faltantes, fuera de la ventana de cierre.",
+            },
+            {
                 "name": "[1/6] Daily Algorithmic Trading Pipeline",
                 "task": "run_daily_trading_pipeline",
                 "minute": "50",

@@ -3,19 +3,21 @@ import time
 from datetime import date
 from decimal import Decimal
 from celery import shared_task
-from django.db import transaction
+from django.db import connection, transaction
+from django.db.models import Max, Prefetch
 from django.utils import timezone
 
 from apps.instruments.models import Instrument
-from apps.marketdata.services import MarketDataService
+from apps.marketdata.services import MarketDataService, load_daily_bars_frames
 from apps.marketdata.models import Bar, LatestQuote
-from apps.strategies.models import Strategy, StrategyVersion, Signal
+from apps.strategies.models import Strategy, StrategyVersion, StrategyInstrument, Signal
 from apps.strategies.engines import get_engine
 from apps.portfolios.models import Portfolio
 from apps.trading.models import RebalanceRun, OrderIntent
 from apps.trading.allocator import PortfolioAllocator
 from apps.trading.execution import OrderDispatcher
 from apps.trading.guards import skip_if_not_trading_day
+from apps.trading.universe import pipeline_universe
 from apps.trading.pipeline import (
     get_or_create_today_pipeline, pipeline_step, record_timing, step_lock, step_skip_reason, update_pipeline,
 )
@@ -75,17 +77,55 @@ def marketdata_refresh():
 
 def _marketdata_refresh():
     with pipeline_step("marketdata") as metrics:
-        svc = MarketDataService()
-        instruments = Instrument.objects.filter(tradable=True)
-        errors = 0
-        for inst in instruments:
-            # Historial completo la primera vez (lo exigen apalancamiento y regímenes); luego incremental.
-            svc.ensure_history(inst)
-            if svc.update_latest_quote(inst.symbol) is None:
-                errors += 1
-        count = instruments.count()
-        metrics.update({"instruments": count, "errors": errors})
-    return f"Refreshed {count} instruments"
+        # Solo el universo en uso (bots live activos + posiciones abiertas), con HTTP concurrente.
+        # Historial completo la primera vez (lo hace normalmente prewarm_market_data); luego incremental.
+        instruments = list(pipeline_universe())
+        metrics.update(MarketDataService().refresh_many(instruments))
+    return f"Refreshed {len(instruments)} instruments"
+
+
+@shared_task(name="prewarm_market_data", queue="pipeline")
+@skip_if_not_trading_day("prewarm_market_data")
+def prewarm_market_data():
+    """
+    Pre-calentamiento (15:30 NY): descarga el historial completo de los instrumentos del universo
+    que aún no lo tienen y los fundamentales que falten de los bots ranked_allocation, para que el
+    pipeline de 15:50 no haga descargas pesadas dentro de la ventana de cierre.
+    """
+    from apps.fundamentals.models import FundamentalStatement
+    from apps.fundamentals.services import ProviderChain, instruments_for_active_ranked_bots, sync_instrument
+
+    logger.info("Executing prewarm_market_data...")
+    svc = MarketDataService()
+    synced, history_errors = 0, []
+    for inst in pipeline_universe().filter(full_history_synced=False):
+        if svc.ensure_history(inst, incremental=False) > 0:
+            synced += 1
+        else:
+            history_errors.append(inst.symbol)
+
+    fundamentals, fundamentals_errors = 0, []
+    missing = [
+        inst for inst in instruments_for_active_ranked_bots()
+        if not FundamentalStatement.objects.filter(instrument=inst).exists()
+    ]
+    chain = ProviderChain() if missing else None
+    for inst in missing:
+        try:
+            if sync_instrument(inst, chain).get("saved"):
+                fundamentals += 1
+            else:
+                fundamentals_errors.append(inst.symbol)
+        except Exception as e:
+            logger.error(f"Prewarm: fundamentales de {inst.symbol} fallaron: {e}")
+            fundamentals_errors.append(inst.symbol)
+
+    if history_errors or fundamentals_errors:
+        logger.warning(f"Prewarm incompleto. Historial: {history_errors}. Fundamentales: {fundamentals_errors}.")
+    return (
+        f"Prewarmed full history for {synced} instruments ({len(history_errors)} errors), "
+        f"fundamentals for {fundamentals} instruments ({len(fundamentals_errors)} errors)"
+    )
 
 
 def get_frozen_ranking(version, as_of_date):
@@ -133,19 +173,63 @@ def compute_regimes_and_signals(force: bool = False):
         return _compute_regimes_and_signals()
 
 
+def latest_signal_exposures(version_ids) -> dict:
+    """
+    Última target_exposure por (version_id, instrument_id) en una sola pasada (sin N+1):
+    DISTINCT ON en Postgres; en otros motores, máximo as_of por grupo + una segunda consulta.
+    """
+    base = Signal.objects.filter(version_id__in=list(version_ids))
+    if connection.vendor == "postgresql":
+        rows = (
+            base.order_by("version_id", "instrument_id", "-as_of")
+            .distinct("version_id", "instrument_id")
+            .values_list("version_id", "instrument_id", "target_exposure")
+        )
+        return {(v, i): exposure for v, i, exposure in rows}
+
+    latest = {
+        (r["version_id"], r["instrument_id"]): r["max_as_of"]
+        for r in base.order_by().values("version_id", "instrument_id").annotate(max_as_of=Max("as_of"))
+    }
+    if not latest:
+        return {}
+    rows = base.filter(as_of__in=set(latest.values())).values_list("version_id", "instrument_id", "as_of", "target_exposure")
+    return {(v, i): exposure for v, i, as_of, exposure in rows if latest.get((v, i)) == as_of}
+
+
 def _compute_regimes_and_signals():
     with pipeline_step("signals") as metrics:
         per_version = {}
-        versions = StrategyVersion.objects.filter(status="live", strategy__is_active=True).select_related("strategy")
+        versions = list(
+            StrategyVersion.objects.filter(status="live", strategy__is_active=True)
+            .select_related("strategy")
+            .prefetch_related(Prefetch(
+                "instruments", queryset=StrategyInstrument.objects.select_related("instrument").order_by("id"),
+            ))
+        )
         signals_computed = 0
         today_ny = get_ny_now().date()
+
+        # Caché de la corrida: barras de todo el universo en lote (no una lectura por bot e
+        # instrumento), últimas señales por (versión, instrumento) e instrumentos por símbolo.
+        cache_started = time.monotonic()
+        all_instruments = {si.instrument_id: si.instrument for v in versions for si in v.instruments.all()}
+        bars_cache = load_daily_bars_frames(all_instruments)
+        last_exposures = latest_signal_exposures(v.id for v in versions)
+        instruments_by_symbol = {inst.symbol: inst for inst in all_instruments.values()}
+        missing_history = sorted({inst.symbol for inst in all_instruments.values() if not inst.full_history_synced})
+        if missing_history:
+            logger.warning(
+                f"Instrumentos sin historial completo (se omiten; los descarga prewarm_market_data): {missing_history}"
+            )
+        metrics.update({"cache_seconds": round(time.monotonic() - cache_started, 3), "missing_history": missing_history})
 
         for v in versions:
             version_started = time.monotonic()
             strat = v.strategy
             engine = get_engine(strat.engine)
 
-            instruments = v.instruments.all().select_related("instrument")
+            instruments = v.instruments.all()
             ohlcv_dict = {}
             weights = {}
 
@@ -153,19 +237,15 @@ def _compute_regimes_and_signals():
                 sym = si.instrument.symbol
                 weights[sym] = si.weight
 
-                # Auto-warmup: garantiza el historial completo disponible antes de calcular señales,
-                # para que EMAs, Z-Scores y el Profit Factor walk-forward usen todos los trades históricos.
+                # Sin historial completo, EMAs, Z-Scores y el Profit Factor walk-forward no usarían
+                # todos los trades históricos: el instrumento se omite (no se descarga en la ventana).
                 if not si.instrument.full_history_synced:
-                    MarketDataService().ensure_history(si.instrument, incremental=False)
+                    continue
 
-                rows = list(
-                    Bar.objects.filter(instrument=si.instrument).order_by("date")
-                    .values_list("date", "open", "high", "low", "close", "volume")
-                )
-                if rows:
-                    import pandas as pd
-                    df = pd.DataFrame(rows, columns=["Date", "Open", "High", "Low", "Close", "Volume"]).set_index("Date")
-                    ohlcv_dict[sym] = df.astype(float)
+                df = bars_cache.get(si.instrument_id)
+                if df is not None:
+                    # Copia por bot: los engines no deben poder alterar el caché compartido
+                    ohlcv_dict[sym] = df.copy()
 
             if not ohlcv_dict:
                 continue
@@ -197,22 +277,24 @@ def _compute_regimes_and_signals():
                         diagnostics=sanitize_json_for_db(diagnostics),
                     )
 
+                now = timezone.now()
+                new_signals = []
                 for sym, exposure in targets.items():
-                    inst = Instrument.objects.filter(symbol=sym).first()
+                    inst = instruments_by_symbol.get(sym) or Instrument.objects.filter(symbol=sym).first()
                     if inst:
-                        last_sig = Signal.objects.filter(version=v, instrument=inst).order_by("-as_of").first()
-                        changed = (last_sig.target_exposure != exposure) if last_sig else True
+                        last_exposure = last_exposures.get((v.id, inst.id))
+                        changed = (last_exposure != exposure) if last_exposure is not None else True
                         clean_diag = sanitize_json_for_db(diagnostics.get(sym, {}))
-                        Signal.objects.create(
+                        new_signals.append(Signal(
                             version=v,
                             instrument=inst,
-                            as_of=timezone.now(),
+                            as_of=now,
                             target_exposure=exposure,
                             changed=changed,
                             diagnostics=clean_diag,
-                        )
-
-                        signals_computed += 1
+                        ))
+                Signal.objects.bulk_create(new_signals)
+                signals_computed += len(new_signals)
             except Exception as e:
                 logger.error(f"Error computing signal for {strat.slug} v{v.version}: {e}")
             per_version[f"{strat.slug}@v{v.version}"] = round(time.monotonic() - version_started, 3)

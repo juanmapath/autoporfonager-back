@@ -13,6 +13,7 @@ from apps.trading.pipeline import get_or_create_today_pipeline, pipeline_step
 from apps.trading.tasks import (
     compute_regimes_and_signals,
     dispatch_moc_and_manual_orders,
+    marketdata_refresh,
     run_daily_trading_pipeline,
 )
 from core.market_time import get_ny_now
@@ -84,6 +85,7 @@ def test_failed_step_is_recorded_and_next_steps_still_run():
 def test_signals_step_records_duration_per_bot_when_called_directly():
     _setup_bot_and_portfolio()
     with _fake_provider():
+        marketdata_refresh()
         compute_regimes_and_signals()
 
     run = get_or_create_today_pipeline()

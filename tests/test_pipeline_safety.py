@@ -246,6 +246,7 @@ def test_fallbacks_run_when_step_failed_and_warn_about_stale_signals():
     _set_steps(signals="failed", orchestration="failed")
 
     with _fake_provider():
+        tasks.marketdata_refresh()
         assert tasks.fallback_compute_signals() == "Computed 1 signals"
     assert get_or_create_today_pipeline().signals_status == "done"
 
