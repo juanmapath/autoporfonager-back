@@ -13,9 +13,10 @@ class FakeProvider:
     diarias deterministas (paseo aleatorio sembrado por símbolo) y latencia simulada por request.
     """
 
-    def __init__(self, latency_ms: float = 0, seed: int = 0):
+    def __init__(self, latency_ms: float = 0, seed: int = 0, history_years: int = 10):
         self.latency_ms = latency_ms
         self.seed = seed
+        self.history_days = int(history_years * 365)
         self.calls = 0
 
     def _sleep(self):
@@ -32,11 +33,11 @@ class FakeProvider:
     def get_daily_bars(self, symbol: str, start_dt: datetime) -> pd.DataFrame:
         self._sleep()
         end = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        start = max(start_dt, end - timedelta(days=3650))
+        start = max(start_dt, end - timedelta(days=self.history_days))
         dates = pd.bdate_range(start.date(), end.date(), tz="UTC")
         # El paseo se genera desde una fecha fija para que la descarga incremental coincida
         # con la completa en los días que se solapan.
-        anchor = pd.bdate_range(end.date() - timedelta(days=3650), end.date(), tz="UTC")
+        anchor = pd.bdate_range(end.date() - timedelta(days=self.history_days), end.date(), tz="UTC")
         rets = self._rng(symbol).normal(0.0004, 0.015, len(anchor))
         closes = pd.Series(self._base_price(symbol) * np.exp(np.cumsum(rets)), index=anchor).reindex(dates)
         closes = closes.dropna()

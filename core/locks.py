@@ -7,10 +7,14 @@ logger = logging.getLogger(__name__)
 
 
 def _redis_client():
-    """Cliente Redis para locks; aislado para poder desactivarlo en tests."""
+    """
+    Cliente Redis para locks; aislado para poder desactivarlo en tests. Timeouts cortos: si Redis
+    no responde, el lock cae al modo local en ~1 s en vez de esperar el timeout TCP del sistema
+    (decenas de segundos por portafolio dentro de la ventana de cierre).
+    """
     import redis
     redis_url = getattr(settings, "REDIS_URL", "redis://localhost:6379/0")
-    return redis.Redis.from_url(redis_url)
+    return redis.Redis.from_url(redis_url, socket_connect_timeout=1, socket_timeout=2)
 
 
 @contextmanager
