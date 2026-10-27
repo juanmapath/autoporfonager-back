@@ -50,13 +50,15 @@ def generate_signals_multi_state(entry_conditions, exit_conditions, valid_mask, 
                     bars_out[k] += 1
             
         # 1. Evaluar salida de la posición actual
+        exited_state = None
         if active_state != 'none':
             max_d = max_days.get(active_state, 999999)
             time_exit = bars_in >= max_d
-            
+
             if exit_arrs[active_state][i] or time_exit:
                 signals[i] = -1
                 bars_out[active_state] = 0
+                exited_state = active_state
                 active_state = 'none'
                 bars_in = 0
             # Transición directa: si estamos en meanreversion y se da la entrada de tendencia
@@ -68,10 +70,13 @@ def generate_signals_multi_state(entry_conditions, exit_conditions, valid_mask, 
             else:
                 signals[i] = 0
                 
-        # 2. Evaluar entrada si no estamos posicionados (o acabamos de salir en la misma barra)
+        # 2. Evaluar entrada si no estamos posicionados. Si un estado acaba de salir en esta barra,
+        #    solo otro estado distinto puede entrar: la salida es parte de la naturaleza del estado.
         if active_state == 'none':
             entered = False
             for k in keys:
+                if k == exited_state:
+                    continue
                 min_cd = cooldowns.get(k, 0)
                 if entry_arrs[k][i] and bars_out[k] >= min_cd:
                     signals[i] = 1
@@ -289,7 +294,7 @@ def rsi_weakness(data_df, params):
     gain = (delta.where(delta > 0, 0)).rolling(window=rsi_period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_period).mean()
     rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
+    rsi = (100 - (100 / (1 + rs))).round(2)  # ops redondea el RSI a 2 decimales
 
     entry_cond = rsi < rsi_lower
     exit_cond = close > high.shift(1)
@@ -323,7 +328,7 @@ def bollinger_bands(data_df, params):
         mult = 2.0
 
     bb_mid = close.rolling(window=ma).mean()
-    bb_std = close.rolling(window=ma).std()
+    bb_std = close.rolling(window=ma).std(ddof=0)  # ops usa np.std (poblacional)
     bb_down = bb_mid - (bb_std * mult)
 
     entry_cond = close < bb_down
@@ -430,7 +435,7 @@ def regression_rsi_short(data_df, params):
     loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_win).mean()
 
     rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
+    rsi = (100 - (100 / (1 + rs))).round(2)  # ops redondea el RSI a 2 decimales
 
     entry_cond = (slope_series < 0) & (rsi > rsi_upper)
     exit_cond = close < low.shift(1)
@@ -772,7 +777,7 @@ def trend_pull_back_rsi(data_df, params):
     gain = (delta.where(delta > 0, 0)).rolling(window=rsi_window).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_window).mean()
     rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
+    rsi = (100 - (100 / (1 + rs))).round(2)  # ops redondea el RSI a 2 decimales
 
     # MAs
     ma_s = close.rolling(window=ma_slow).mean()
@@ -877,7 +882,7 @@ def buy_weakness(data_df, params):
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
+    rsi = (100 - (100 / (1 + rs))).round(2)  # ops redondea el RSI a 2 decimales
 
     # Williams %R
     highest_high = high.rolling(window=wr_period).max()
@@ -981,7 +986,7 @@ def buy_weakness_x(data_df, params):
     gain = (delta.where(delta > 0, 0.0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0.0)).rolling(window=14).mean()
     rs = gain / loss
-    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi = (100.0 - (100.0 / (1.0 + rs))).round(2)  # ops redondea el RSI a 2 decimales
 
     # Scoring escalonado idéntico a BotOps
     c_ema50 = np.where(dema5 > ema50, 1, -1)
@@ -1132,7 +1137,7 @@ def zs_cross_dema_combox2(data_df, params):
     change_down = np.where(change < 0, np.abs(change), 0)
     avg_up = pd.Series(change_up, index=close.index).rolling(rsi_p).mean()
     avg_down = pd.Series(change_down, index=close.index).rolling(rsi_p).mean()
-    rsi = (100 * avg_up) / (avg_up + avg_down)
+    rsi = ((100 * avg_up) / (avg_up + avg_down)).round(2)  # ops redondea el RSI a 2 decimales
 
     # Lógica de Compra (Cond1 o Cond2)
     cond1 = ((d_rapid > d_slow) & (zdema > 1)) | ((d_rapid > d_slow) & (zdema < 1) & (zdema_slope > 0))
@@ -1280,7 +1285,8 @@ def zs_pull(data_df, params):
     zscore = (close - z_mean) / z_std
 
     entry_cond = (zscore > z_lvl) & (zscore.shift(1) < z_lvl)
-    exit_cond = close > high.shift(1)
+    # Igual que ops: sale en cuanto deja de cumplirse la entrada (mantiene 1 vela tras el cruce)
+    exit_cond = ~entry_cond
     valid_mask = zscore.notnull()
 
     entry_conditions = {'meanreversion': entry_cond}
