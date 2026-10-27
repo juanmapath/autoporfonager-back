@@ -20,6 +20,10 @@ class Command(BaseCommand):
         PeriodicTask.objects.filter(name__startswith="[5/5]").delete()
         # Replaced by the 15:57 dispatch; left enabled it would send orders at 15:55.
         PeriodicTask.objects.filter(name="[4/6] Fallback: Order Dispatch (Alpaca & Simulated)").delete()
+        # Fallbacks incondicionales reemplazados por fallback_compute_signals / fallback_orchestrate,
+        # que solo corren si el paso de hoy quedó pendiente o falló.
+        PeriodicTask.objects.filter(name="[2/6] Fallback: Compute Quantitative Signals").delete()
+        PeriodicTask.objects.filter(name="[3/6] Fallback: Portfolio Rebalance & Allocation Orchestration").delete()
 
         schedules_def = [
             {
@@ -31,20 +35,20 @@ class Command(BaseCommand):
                 "description": "Pipeline de preparación (15:50 NY): descarga market data, genera señales y rebalancea carteras. Las órdenes se envían a las 15:57 NY.",
             },
             {
-                "name": "[2/6] Fallback: Compute Quantitative Signals",
-                "task": "compute_regimes_and_signals",
+                "name": "[2/6] Conditional Fallback: Compute Quantitative Signals",
+                "task": "fallback_compute_signals",
                 "minute": "52",
                 "hour": "15",
                 "day_of_week": "1-5",  # Mon-Fri
-                "description": "Respaldo automático a las 15:52 NY en caso de retraso o fallo en la descarga previa.",
+                "description": "Respaldo a las 15:52 NY: recalcula señales solo si el paso de hoy quedó pendiente o falló (se omite si está hecho o en curso).",
             },
             {
-                "name": "[3/6] Fallback: Portfolio Rebalance & Allocation Orchestration",
-                "task": "orchestrate_portfolio_runs",
+                "name": "[3/6] Conditional Fallback: Portfolio Rebalance & Allocation Orchestration",
+                "task": "fallback_orchestrate",
                 "minute": "53",
                 "hour": "15",
                 "day_of_week": "1-5",  # Mon-Fri
-                "description": "Respaldo automático a las 15:53 NY: genera rebalanceos para cualquier cartera pendiente hoy.",
+                "description": "Respaldo a las 15:53 NY: orquesta solo si el paso de hoy quedó pendiente o falló; avisa por Telegram si las señales no están actualizadas.",
             },
             {
                 "name": "[4/6] Order Dispatch (Alpaca Market DAY & Simulated)",

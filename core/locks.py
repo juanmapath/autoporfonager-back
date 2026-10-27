@@ -6,26 +6,36 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 
+def _redis_client():
+    """Cliente Redis para locks; aislado para poder desactivarlo en tests."""
+    import redis
+    redis_url = getattr(settings, "REDIS_URL", "redis://localhost:6379/0")
+    return redis.Redis.from_url(redis_url)
+
+
 @contextmanager
 def redis_lock(key: str, timeout: int = 60, blocking_timeout: int = 5) -> Generator[bool, None, None]:
     """
     Context manager acquiring a distributed lock using Redis.
-    Falls back gracefully if Redis is unavailable in local development.
+    Falls back gracefully (yields True) if Redis is unavailable in local development: in that case
+    the lock gives no mutual exclusion, so callers that need a hard guarantee must also serialize
+    in the database (select_for_update).
+    Only acquisition errors trigger the fallback; exceptions raised inside the `with` body propagate.
     """
-    client = None
     lock = None
     try:
-        import redis
-        redis_url = getattr(settings, "REDIS_URL", "redis://localhost:6379/0")
-        client = redis.Redis.from_url(redis_url)
+        client = _redis_client()
         lock = client.lock(f"lock:{key}", timeout=timeout, sleep=0.1)
         acquired = lock.acquire(blocking=True, blocking_timeout=blocking_timeout)
-        yield acquired
     except Exception as e:
         logger.debug(f"Redis lock unavailable for {key}: {e}. Proceeding in local fallback mode.")
-        yield True
+        lock = None
+        acquired = True
+
+    try:
+        yield acquired
     finally:
-        if lock and client:
+        if lock is not None and acquired:
             try:
                 lock.release()
             except Exception:

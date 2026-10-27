@@ -58,6 +58,38 @@ def _refresh_overall_status(run: DailyPipelineRun) -> None:
         run.finished_at = run.finished_at or timezone.now()
 
 
+STEP_LOCK_TIMEOUT_SECONDS = 900
+
+
+@contextmanager
+def step_lock(step: str, trade_date: Optional[date] = None) -> Generator[bool, None, None]:
+    """
+    Lock Redis por paso y día (`pipeline:{step}:{fecha}`): nunca corren a la vez dos ejecuciones
+    del mismo paso (pipeline y fallback). Espera como máximo 1 s; si no lo obtiene, el llamador
+    debe omitir el paso.
+    """
+    from core.locks import redis_lock
+
+    trade_date = trade_date or get_ny_now().date()
+    with redis_lock(f"pipeline:{step}:{trade_date}", timeout=STEP_LOCK_TIMEOUT_SECONDS, blocking_timeout=1) as acquired:
+        yield acquired
+
+
+def step_skip_reason(step: str, acquired: bool, force: bool = False, trade_date: Optional[date] = None) -> Optional[str]:
+    """
+    Motivo para omitir un paso, o None si debe correr: otro proceso tiene el lock, o (sin `force`)
+    el paso de hoy ya está `done` o `running`. Un paso `pending`/`failed` siempre corre.
+    """
+    if not acquired:
+        return f"Skipped: {step} already running (lock held)"
+    if force:
+        return None
+    status = get_or_create_today_pipeline(trade_date).step_status(step)
+    if status in ("done", "running"):
+        return f"Skipped: {step} already {status} today"
+    return None
+
+
 @contextmanager
 def pipeline_step(step: str, trade_date: Optional[date] = None) -> Generator[Dict, None, None]:
     """
