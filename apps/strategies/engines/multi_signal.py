@@ -5,6 +5,7 @@ import pandas as pd
 from apps.strategies.engines.base import BaseEngine
 from apps.strategies.signals.catalog import STRATEGY_MAP
 from apps.strategies.signals.sizing import pulses_to_long_state, resolve_leverage_params, current_trade_leverage
+from apps.strategies.regimes.service import policy_and_labels
 
 
 class MultiSignalEngine(BaseEngine):
@@ -72,9 +73,12 @@ class MultiSignalEngine(BaseEngine):
 
             # Apalancamiento fijado en la entrada del trade abierto (misma lógica que el backtest)
             applied_leverage = 1.0
+            lev_info = {}
             if is_long:
-                applied_leverage = current_trade_leverage(
-                    df["Close"].values, combined_long.values, base_leverage, max_leverage, use_dynamic_leverage
+                policy, labels = policy_and_labels(params, df.index)
+                applied_leverage, lev_info = current_trade_leverage(
+                    df["Close"].values, combined_long.values, base_leverage, max_leverage, use_dynamic_leverage,
+                    policy=policy, dates=df.index, regime_labels=labels, return_info=True,
                 )
             exposure = weight * Decimal(str(round(applied_leverage, 4))) if is_long else Decimal("0.0")
             targets[symbol] = exposure
@@ -84,6 +88,7 @@ class MultiSignalEngine(BaseEngine):
                 "active_strategies": active_names,
                 "is_long": bool(is_long),
                 "applied_leverage": round(applied_leverage, 4),
+                "leverage": lev_info,
                 "exposure": str(exposure),
             }
 

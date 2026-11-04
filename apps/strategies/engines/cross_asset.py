@@ -4,6 +4,7 @@ import pandas as pd
 from apps.strategies.engines.base import BaseEngine
 from apps.strategies.signals.catalog import STRATEGY_MAP
 from apps.strategies.signals.sizing import pulses_to_long_state, resolve_leverage_params, current_trade_leverage
+from apps.strategies.regimes.service import policy_and_labels
 
 
 class CrossAssetEngine(BaseEngine):
@@ -50,13 +51,16 @@ class CrossAssetEngine(BaseEngine):
 
         targets = {}
         leverages = {}
+        lev_infos = {}
         for sym, weight in instruments_weights.items():
             traded_df = ohlcv_data.get(sym)
             applied_leverage = 1.0
             if is_long and traded_df is not None and not traded_df.empty:
                 traded_state = long_state.reindex(traded_df.index).fillna(False).astype(bool)
-                applied_leverage = current_trade_leverage(
-                    traded_df["Close"].values, traded_state.values, base_leverage, max_leverage, use_dynamic_leverage
+                policy, labels = policy_and_labels(params, traded_df.index)
+                applied_leverage, lev_infos[sym] = current_trade_leverage(
+                    traded_df["Close"].values, traded_state.values, base_leverage, max_leverage, use_dynamic_leverage,
+                    policy=policy, dates=traded_df.index, regime_labels=labels, return_info=True,
                 )
             leverages[sym] = round(applied_leverage, 4)
             targets[sym] = weight * Decimal(str(round(applied_leverage, 4))) if is_long else Decimal("0.0")
@@ -66,6 +70,7 @@ class CrossAssetEngine(BaseEngine):
             "raw_signal": last_sig,
             "is_long": is_long,
             "applied_leverage": leverages,
+            "leverage": lev_infos,
             "targets": {k: str(v) for k, v in targets.items()},
         }
         return targets, diagnostics

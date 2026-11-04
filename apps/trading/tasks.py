@@ -12,6 +12,7 @@ from apps.marketdata.services import MarketDataService, load_daily_bars_frames
 from apps.marketdata.models import Bar, LatestQuote
 from apps.strategies.models import Strategy, StrategyVersion, StrategyInstrument, Signal
 from apps.strategies.engines import get_engine
+from apps.strategies.signals.sizing import resolve_leverage_policy
 from apps.portfolios.models import Portfolio
 from apps.trading.models import RebalanceRun, OrderIntent
 from apps.trading.allocator import PortfolioAllocator
@@ -201,6 +202,33 @@ def latest_signal_exposures(version_ids) -> dict:
     return {(v, i): exposure for v, i, as_of, exposure in rows if latest.get((v, i)) == as_of}
 
 
+def _compute_daily_regimes(versions, metrics):
+    """Calcula y guarda el régimen del día de cada proveedor en uso. Devuelve ({proveedor: serie}, {proveedor: etiqueta})."""
+    from apps.strategies.regimes.service import (
+        build_series_from_bars, ensure_regime_instruments, provider_keys_for_versions, save_snapshots,
+    )
+
+    provider_keys = provider_keys_for_versions(versions)
+    if not provider_keys:
+        return {}, {}
+    try:
+        instruments = ensure_regime_instruments(provider_keys)
+        missing = [i.symbol for i in instruments if not i.full_history_synced]
+        if missing:
+            logger.warning(f"Regimenes: instrumentos sin historial completo (los descarga prewarm_market_data): {missing}")
+            metrics.update({"regime_missing_history": missing})
+            return {}, {}
+        frames = load_daily_bars_frames([i.id for i in instruments])
+        bars = {i.symbol: frames[i.id] for i in instruments if i.id in frames}
+        labels = save_snapshots(provider_keys, bars)
+        metrics.update({"regimes": labels})
+        return build_series_from_bars(provider_keys, bars), labels
+    except Exception as e:
+        logger.error(f"Regimenes: calculo fallido, los bots usan PF global: {e}", exc_info=True)
+        metrics.update({"regime_error": str(e)})
+        return {}, {}
+
+
 def _compute_regimes_and_signals():
     with pipeline_step("signals") as metrics:
         per_version = {}
@@ -227,6 +255,10 @@ def _compute_regimes_and_signals():
                 f"Instrumentos sin historial completo (se omiten; los descarga prewarm_market_data): {missing_history}"
             )
         metrics.update({"cache_seconds": round(time.monotonic() - cache_started, 3), "missing_history": missing_history})
+
+        # Regimenes de mercado (proveedores usados por bots con leverage_policy regime_pf): se calculan y
+        # guardan ANTES de las señales; el mismo calculo causal alimenta el apalancamiento de cada bot.
+        regime_series, regime_labels = _compute_daily_regimes(versions, metrics)
 
         for v in versions:
             version_started = time.monotonic()
@@ -260,6 +292,9 @@ def _compute_regimes_and_signals():
                 source_si = next((si for si in instruments if si.role == "signal_source"), None)
                 if source_si:
                     engine_params["source_symbol"] = source_si.instrument.symbol
+
+            if regime_series and resolve_leverage_policy(engine_params).uses_regimes:
+                engine_params["_regime_series"] = regime_series
 
             # El ranking de los bots ranked_allocation solo se recalcula en fecha de rebalanceo del
             # portafolio; entre fechas se reutiliza el orden del último snapshot.

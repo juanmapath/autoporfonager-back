@@ -140,3 +140,18 @@ class StrategyCatalogSetting(TimeStampedModel):
 
     def __str__(self):
         return f"{self.strategy_name} [{'disponible' if self.available_for_bots else 'bloqueada'}]"
+
+
+class RegimeSnapshot(TimeStampedModel):
+    """Régimen de mercado de un proveedor en una fecha (auditoría de lo que vio el pipeline diario)."""
+    provider = models.CharField(max_length=32)
+    date = models.DateField(db_index=True)
+    label = models.CharField(max_length=64, blank=True)
+    features = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["-date"]
+        constraints = [models.UniqueConstraint(fields=["provider", "date"], name="uniq_regime_provider_date")]
+
+    def __str__(self):
+        return f"{self.provider} {self.date}: {self.label or '-'}"

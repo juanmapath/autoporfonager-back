@@ -5,7 +5,10 @@ import pandas as pd
 from django.utils import timezone
 
 from apps.strategies.signals.catalog import STRATEGY_MAP
-from apps.strategies.signals.sizing import dynamic_leverage_from_pnls
+from apps.strategies.signals.sizing import (
+    ClosedTrade, LeveragePolicy, POLICY_FIXED, POLICY_GLOBAL_PF, aligned_label, policy_entry_leverage,
+    resolve_leverage_policy,
+)
 
 
 def fetch_historical_ohlcv(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -82,6 +85,7 @@ class BacktestEngine:
         use_dynamic_leverage: Optional[bool] = None,
         periodic_deposit: Optional[float] = None,
         deposit_frequency: Optional[str] = None,
+        leverage_policy: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Ejecuta el backtest histórico completo de un Bot (Strategy) de la base de datos.
@@ -109,6 +113,10 @@ class BacktestEngine:
         strat_base_lev = float(leverage if leverage is not None else params.get("leverage", 1.0))
         strat_max_lev = float(max_leverage if max_leverage is not None else params.get("max_leverage", strat_base_lev))
         strat_dyn = use_dynamic_leverage if use_dynamic_leverage is not None else params.get("use_regimes", False)
+        # Politica: la explicita gana; si se fuerza use_dynamic_leverage se usa la legada (fixed/global_pf);
+        # si no, la de la version (`leverage_policy`, o la derivada de `use_regimes`).
+        if leverage_policy is None and use_dynamic_leverage is None:
+            leverage_policy = params.get("leverage_policy")
         strat_deposit = float(periodic_deposit if periodic_deposit is not None else params.get("periodic_deposit", 0.0))
         strat_freq = str(deposit_frequency or params.get("deposit_frequency", "monthly"))
 
@@ -122,6 +130,7 @@ class BacktestEngine:
             leverage=strat_base_lev,
             max_leverage=strat_max_lev,
             use_dynamic_leverage=strat_dyn,
+            leverage_policy=leverage_policy,
             strategy_params=params,
             periodic_deposit=strat_deposit,
             deposit_frequency=strat_freq,
@@ -141,6 +150,8 @@ class BacktestEngine:
         strategy_params: Optional[Dict[str, Any]] = None,
         periodic_deposit: float = 0.0,
         deposit_frequency: str = "monthly",
+        leverage_policy: Optional[Dict[str, Any]] = None,
+        regime_series: Optional[Dict[str, pd.Series]] = None,
     ) -> Dict[str, Any]:
         """
         Ejecuta el backtest a partir de una configuración ad-hoc o personalizada.
@@ -365,7 +376,20 @@ class BacktestEngine:
                 entry_meta_by_date=entry_meta_by_date,
             )
 
-        # 3. Simulación de Ejecución con Apalancamiento Dinámico y Atribución
+        # 3. Politica de apalancamiento (la misma funcion que usan los motores en vivo) y series de regimen
+        if leverage_policy:
+            policy = resolve_leverage_policy({"leverage_policy": leverage_policy})
+        else:
+            policy = LeveragePolicy(type=POLICY_GLOBAL_PF if use_dynamic_leverage else POLICY_FIXED)
+        regime_labels = None
+        if policy.uses_regimes:
+            from apps.strategies.regimes.service import align_labels, fetch_series_backtest
+
+            if regime_series is None:
+                regime_series = fetch_series_backtest(policy, start_date, end_date)
+            regime_labels = {p: align_labels(regime_series.get(p), df_traded_eval.index) for p in policy.providers}
+
+        # 4. Simulación de Ejecución con Apalancamiento Dinámico y Atribución
         return self._simulate(
             df=df_traded_eval,
             signals=signals_eval,
@@ -375,6 +399,8 @@ class BacktestEngine:
             use_dynamic_leverage=bool(use_dynamic_leverage),
             entry_meta_by_date=entry_meta_by_date,
             exit_meta_by_date=exit_meta_by_date,
+            leverage_policy=policy,
+            regime_labels=regime_labels,
         )
 
     def _simulate_accumulator(
@@ -599,7 +625,12 @@ class BacktestEngine:
         use_dynamic_leverage: bool = False,
         entry_meta_by_date: Optional[Dict[str, List[str]]] = None,
         exit_meta_by_date: Optional[Dict[str, List[str]]] = None,
+        leverage_policy: Optional[LeveragePolicy] = None,
+        regime_labels: Optional[Dict[str, List[Optional[str]]]] = None,
     ) -> Dict[str, Any]:
+        if leverage_policy is None:
+            leverage_policy = LeveragePolicy(type=POLICY_GLOBAL_PF if use_dynamic_leverage else POLICY_FIXED)
+        regime_labels = regime_labels or {}
         closes = df["Close"].values
         dates = df.index
         n = len(closes)
@@ -622,6 +653,10 @@ class BacktestEngine:
         entry_strat_name = "Estrategia"
         trade_leverage = base_leverage
         in_position = False
+        closed_trades: List[ClosedTrade] = []
+        entry_regimes: Dict[str, Optional[str]] = {}
+        entry_idx = 0
+        trade_lev_info: Dict[str, Any] = {}
 
         for i in range(n):
             price = float(closes[i])
@@ -630,10 +665,11 @@ class BacktestEngine:
 
             # Buy Signal (1)
             if sig == 1 and not in_position:
-                # 1. Determinar Apalancamiento Dinámico según Profit Factor Walk-Forward
-                # (lógica compartida con los motores en vivo: apps/strategies/signals/sizing.py)
-                active_leverage = dynamic_leverage_from_pnls(
-                    [t["pnl"] for t in trades], base_leverage, max_leverage, use_dynamic_leverage
+                # 1. Determinar el apalancamiento segun la politica (fixed / global_pf / regime_pf), walk-forward
+                # (funcion compartida con los motores en vivo: apps/strategies/signals/sizing.py)
+                regimes_now = {p: aligned_label(regime_labels.get(p), i) for p in leverage_policy.providers}
+                active_leverage, lev_info = policy_entry_leverage(
+                    leverage_policy, closed_trades, base_leverage, max_leverage, dates[i], regimes_now
                 )
                 adj_price = price * (1.0 + self.slippage)
                 total_equity = cash
@@ -645,6 +681,7 @@ class BacktestEngine:
                     entry_price = adj_price
                     entry_date = d_str
                     trade_leverage = active_leverage
+                    entry_regimes, entry_idx, trade_lev_info = regimes_now, i, lev_info
 
                     # Atribución de inicio
                     matched_entry = entry_meta_by_date.get(d_str) if entry_meta_by_date else None
@@ -664,6 +701,7 @@ class BacktestEngine:
                 matched_exit = exit_meta_by_date.get(d_str) if exit_meta_by_date else None
                 exit_strat_name = " + ".join(matched_exit) if matched_exit else "Regla de Salida"
 
+                closed_trades.append(ClosedTrade(dates[entry_idx], dates[i], round(pnl, 2), entry_regimes))
                 trades.append({
                     "entry_date": entry_date,
                     "exit_date": exit_date,
@@ -675,6 +713,8 @@ class BacktestEngine:
                     "leverage": round(trade_leverage, 2),
                     "entry_strategy": entry_strat_name,
                     "exit_strategy": exit_strat_name,
+                    **({"regimes": dict(entry_regimes), "leverage_info": trade_lev_info}
+                       if leverage_policy.uses_regimes else {}),
                 })
 
                 shares = 0.0
@@ -704,6 +744,8 @@ class BacktestEngine:
                 "entry_strategy": entry_strat_name,
                 "exit_strategy": "En Posición (Abierto)",
                 "open": True,
+                **({"regimes": dict(entry_regimes), "leverage_info": trade_lev_info}
+                   if leverage_policy.uses_regimes else {}),
             })
 
         # --- Métricas Cuantitativas ---
@@ -812,5 +854,6 @@ class BacktestEngine:
                 "base_leverage": base_leverage,
                 "max_leverage": max_leverage,
                 "use_dynamic_leverage": use_dynamic_leverage,
+                "leverage_policy": leverage_policy.to_dict(),
             },
         }

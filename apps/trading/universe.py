@@ -25,4 +25,7 @@ def pipeline_universe() -> QuerySet:
     # ETF del cash sweep de los portafolios que lo tienen activo (historial completo y cotizacion diaria)
     from apps.trading.cash_sweep import sweep_instrument_ids
     ids |= sweep_instrument_ids()
+    # Instrumentos macro (HYG, LQD, DXY, VIX) de los proveedores de régimen que usa algún bot live
+    from apps.strategies.regimes.service import regime_instrument_ids
+    ids |= regime_instrument_ids()
     return Instrument.objects.filter(id__in=ids).order_by("id")
