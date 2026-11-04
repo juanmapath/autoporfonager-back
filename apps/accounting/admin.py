@@ -1,5 +1,11 @@
 from django.contrib import admin
-from .models import LogicalPosition, BrokerPositionSnapshot, LedgerEntry, EquitySnapshot, SleevePnlDaily, BenchmarkDaily
+from .models import LogicalPosition, BrokerPositionSnapshot, LedgerEntry, EquitySnapshot, SleevePnlDaily, SleeveCashEntry, BenchmarkDaily
+
+
+@admin.register(SleeveCashEntry)
+class SleeveCashEntryAdmin(admin.ModelAdmin):
+    list_display = ("portfolio", "strategy", "entry_type", "amount", "effective_date", "reference")
+    list_filter = ("entry_type", "portfolio", "strategy")
 
 
 @admin.register(LogicalPosition)

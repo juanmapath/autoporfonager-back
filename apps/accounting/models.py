@@ -57,6 +57,40 @@ class LedgerEntry(ImmutableModel):
         return f"Ledger #{self.id} {self.portfolio.name} {self.entry_type}: ${self.amount}"
 
 
+class SleeveCashEntry(ImmutableModel):
+    """
+    Caja de cada manga (bot) dentro de un portafolio. Solo se insertan asientos:
+        sleeve_cash  = sum(amount)
+        sleeve_value = sleeve_cash + valor de mercado de las LogicalPosition de la manga
+    La caja puede ser negativa (apalancamiento). Ver accounting/sleeves.py.
+    """
+    ENTRY_TYPES = (
+        ("initial", "Asignacion inicial"),
+        ("transfer", "Transferencia por rebalanceo de portafolio"),
+        ("deposit_alloc", "Reparto de deposito"),
+        ("withdrawal_alloc", "Reparto de retiro"),
+        ("trade", "Compra/venta (desde Fill)"),
+        ("fee", "Comision"),
+        ("dividend", "Dividendo"),
+        ("residual", "Ajuste de conciliacion con el broker"),
+    )
+    # Asientos que mueven capital entre mangas / desde fuera: no son rendimiento del bot.
+    EXTERNAL_TYPES = ("initial", "transfer", "deposit_alloc", "withdrawal_alloc")
+
+    portfolio = models.ForeignKey(Portfolio, on_delete=models.CASCADE, related_name="sleeve_cash_entries")
+    strategy = models.ForeignKey(Strategy, on_delete=models.CASCADE, related_name="sleeve_cash_entries")
+    entry_type = models.CharField(max_length=24, choices=ENTRY_TYPES)
+    amount = models.DecimalField(max_digits=20, decimal_places=6, help_text="+ entra caja a la manga, - sale")
+    effective_date = models.DateField(db_index=True)
+    reference = models.CharField(max_length=128, blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["portfolio", "strategy"])]
+
+    def __str__(self):
+        return f"SleeveCash {self.portfolio_id}/{self.strategy_id} {self.entry_type}: {self.amount}"
+
+
 class EquitySnapshot(TimeStampedModel):
     """Daily total portfolio equity curve snapshot."""
     portfolio = models.ForeignKey(Portfolio, on_delete=models.CASCADE, related_name="equity_snapshots")

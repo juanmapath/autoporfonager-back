@@ -87,6 +87,9 @@ def sync_alpaca_cash_flows(account: BrokerAccount) -> int:
             reference=ref,
             effective_date=effective,
         )
+        # El aporte entra a las mangas: depositos segun target_weight, retiros pro-rata.
+        from apps.accounting.sleeves import allocate_cash_flow
+        allocate_cash_flow(account.portfolio, amount, effective, ref)
         known.add(ref)
         created += 1
 

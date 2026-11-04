@@ -26,6 +26,7 @@ from apps.accounting.services import portfolio_equity
 from apps.brokers.services import sync_alpaca_account
 from core.locks import redis_lock
 from core.market_time import get_ny_now
+from core.money import quantize_amount
 
 logger = logging.getLogger(__name__)
 
@@ -821,8 +822,42 @@ def accounting_daily_snapshot():
             }
         )
         created += 1
+        record_sleeve_pnl(port, today, total_eq)
 
     return f"Created {created} daily equity snapshots"
+
+
+def record_sleeve_pnl(portfolio, as_of: date, equity: Decimal) -> int:
+    """
+    Llena SleevePnlDaily de cada manga: sleeve_value del dia y pnl = variacion de valor menos el
+    capital que entro/salio de la manga (reparto inicial, transferencias, aportes). Tambien deja el
+    residual contra el equity en el log (no se esconde).
+    """
+    from apps.accounting.models import SleevePnlDaily
+    from apps.accounting.sleeves import (
+        ensure_sleeve_accounts, sleeve_diagnostics, external_flows,
+    )
+
+    ensure_sleeve_accounts(portfolio, equity=equity)
+    diag = sleeve_diagnostics(portfolio, equity)
+    written = 0
+    for strategy_id, info in diag["sleeves"].items():
+        prev = SleevePnlDaily.objects.filter(
+            portfolio=portfolio, strategy_id=strategy_id, date__lt=as_of,
+        ).order_by("-date").first()
+        flows = external_flows(portfolio, strategy_id, prev.date if prev else None, as_of)
+        pnl = info["value"] - (prev.sleeve_value if prev else Decimal("0")) - flows
+        SleevePnlDaily.objects.update_or_create(
+            portfolio=portfolio, strategy_id=strategy_id, date=as_of,
+            defaults={"sleeve_value": quantize_amount(info["value"]), "pnl": quantize_amount(pnl)},
+        )
+        written += 1
+    if diag["sleeves"]:
+        logger.info(
+            f"Sleeves {portfolio.name}: suma={diag['sleeves_total']:.2f} equity={equity:.2f} "
+            f"no asignada/residual={diag['unassigned']:.2f}"
+        )
+    return written
 
 
 

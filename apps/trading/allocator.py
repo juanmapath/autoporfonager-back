@@ -32,6 +32,10 @@ class PortfolioAllocator:
             from apps.accounting.services import portfolio_equity
             equity = portfolio_equity(portfolio)["equity"]
 
+        # Contabilidad por manga: portafolios existentes se inicializan en su primer run (equity x peso).
+        from apps.accounting.sleeves import ensure_sleeve_accounts
+        ensure_sleeve_accounts(portfolio, equity=equity)
+
         allocations = portfolio.allocations.filter(enabled=True).select_related("strategy", "broker_account")
         targets_created = []
 
