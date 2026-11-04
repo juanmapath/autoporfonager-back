@@ -50,7 +50,7 @@ def sync_alpaca_cash_flows(account: BrokerAccount) -> int:
     (los anteriores ya forman parte del capital inicial). Idempotente por id de actividad.
     Devuelve el número de movimientos nuevos.
     """
-    from apps.accounting.models import LedgerEntry
+    from apps.accounting.models import EquitySnapshot, LedgerEntry
 
     if account.provider != "alpaca" or not account.credential:
         return 0
@@ -70,6 +70,14 @@ def sync_alpaca_cash_flows(account: BrokerAccount) -> int:
         return 0
 
     known = set(flows.values_list("reference", flat=True))
+    # Alpaca fecha los movimientos (p. ej. ACATS) con el día de proceso, pero el saldo puede reflejarlos
+    # más tarde. Si ya existe un snapshot de esa fecha o posterior, no incluía el efectivo (si no, este
+    # movimiento ya estaría importado), así que se atribuye al día siguiente al último snapshot para que el
+    # TWR lo neutralice en el mismo intervalo en que sube el equity.
+    last_snapshot = (
+        EquitySnapshot.objects.filter(portfolio=account.portfolio)
+        .order_by("-date").values_list("date", flat=True).first()
+    )
     created = 0
     for act in activities:
         ref = f"alpaca:{act.get('id')}"
@@ -81,6 +89,8 @@ def sync_alpaca_cash_flows(account: BrokerAccount) -> int:
         effective = date.fromisoformat(str(act.get("date"))[:10])
         if effective < linked_on:
             continue
+        if last_snapshot and effective <= last_snapshot:
+            effective = last_snapshot + timedelta(days=1)
         LedgerEntry.objects.create(
             portfolio=account.portfolio,
             broker_account=account,

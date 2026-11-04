@@ -200,6 +200,33 @@ def test_sync_alpaca_cash_flows_imports_once_and_skips_pre_link():
 
 
 @pytest.mark.django_db
+def test_sync_alpaca_cash_flows_dates_late_import_after_last_snapshot():
+    from datetime import timedelta
+    from unittest.mock import patch
+    from apps.accounting.models import EquitySnapshot, LedgerEntry
+    from apps.brokers.models import BrokerCredential
+    from apps.brokers.services import sync_alpaca_cash_flows
+    from core.market_time import get_ny_now
+
+    port = _portfolio()
+    cred = BrokerCredential(user=port.user, provider="alpaca", environment="paper")
+    cred.set_secrets({"key_id": "k", "secret_key": "s"})
+    cred.save()
+    account = BrokerAccount.objects.create(
+        portfolio=port, provider="alpaca", environment="paper", display_name="A", credential=cred,
+    )
+    today = get_ny_now().date()
+    # El último snapshot es de hoy y no incluía el ACATS, que Alpaca fecha también hoy.
+    EquitySnapshot.objects.create(portfolio=port, date=today, total_equity=Decimal("11000"))
+    activities = [{"id": "acats", "activity_type": "ACATC", "date": str(today), "net_amount": "5000", "status": "executed"}]
+    with patch("apps.brokers.services.get_alpaca_cash_activities", return_value=activities):
+        assert sync_alpaca_cash_flows(account) == 1
+
+    entry = LedgerEntry.objects.get(portfolio=port, reference="alpaca:acats")
+    assert entry.effective_date == today + timedelta(days=1)
+
+
+@pytest.mark.django_db
 def test_orchestration_sizes_on_synced_broker_equity():
     from unittest.mock import patch
     from apps.trading.models import RebalanceRun
