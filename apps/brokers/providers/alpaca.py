@@ -3,8 +3,9 @@ from datetime import date
 from typing import Dict, Any, List, Optional
 
 # Actividades no comerciales que mueven capital desde/hacia fuera de la cuenta:
-# CSD depósito, CSW retiro, JNLC journal de efectivo entre cuentas, TRANS transferencia.
-CASH_FLOW_ACTIVITY_TYPES = ("CSD", "CSW", "JNLC", "TRANS")
+# CSD depósito, CSW retiro, JNLC journal de efectivo entre cuentas, TRANS transferencia,
+# ACATC transferencia ACATS de efectivo (entrada o salida).
+CASH_FLOW_ACTIVITY_TYPES = ("CSD", "CSW", "JNLC", "TRANS", "ACATC")
 
 
 def _base_url(environment: str) -> str:
