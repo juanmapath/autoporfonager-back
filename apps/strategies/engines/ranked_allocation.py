@@ -119,8 +119,9 @@ class RankedAllocationEngine(BaseEngine):
                     raw_values[m_key][sym] = None
 
         # 4. Compute percentiles per metric
-        # Missing values receive neutral percentile = 0.5
+        # Missing values (None / NaN / +-inf) rank LAST (pct 0.0), below any asset with data.
         percentiles: Dict[str, Dict[str, float]] = {}
+        missing_by_symbol: Dict[str, List[str]] = {sym: [] for sym in symbols}
         for m_cfg in metric_configs:
             m_key = m_cfg.get("key")
             m_def = METRIC_REGISTRY.get(m_key)
@@ -128,31 +129,10 @@ class RankedAllocationEngine(BaseEngine):
                 continue
 
             vals_dict = raw_values[m_key]
-            valid_items = [(sym, v) for sym, v in vals_dict.items() if v is not None and not np.isnan(v)]
-
-            percentiles[m_key] = {}
-
-            if len(valid_items) <= 1:
-                # If only 0 or 1 item has data, all get neutral 0.5
-                for sym in symbols:
-                    percentiles[m_key][sym] = 0.5
-            else:
-                # Sort according to direction
-                # asc: smaller is better -> rank 1 is lowest value -> gets percentile 1.0
-                # desc: higher is better -> rank 1 is highest value -> gets percentile 1.0
-                reverse_sort = (m_def.direction == "desc")
-                sorted_valid = sorted(valid_items, key=lambda x: x[1], reverse=reverse_sort)
-
-                n_valid = len(sorted_valid)
-                for idx, (sym, _) in enumerate(sorted_valid):
-                    # Percentile from 1.0 (best) to 0.0 (worst)
-                    pct = 1.0 - (idx / float(n_valid - 1)) if n_valid > 1 else 0.5
-                    percentiles[m_key][sym] = float(pct)
-
-                # Assign neutral 0.5 to those with missing data
-                for sym in symbols:
-                    if sym not in percentiles[m_key]:
-                        percentiles[m_key][sym] = 0.5
+            percentiles[m_key] = self._metric_percentiles(vals_dict, symbols, m_def.direction)
+            for sym in symbols:
+                if not self._is_finite(vals_dict.get(sym)):
+                    missing_by_symbol[sym].append(m_key)
 
         # 5. Composite Score per Asset
         composite_scores: Dict[str, float] = {}
@@ -254,10 +234,47 @@ class RankedAllocationEngine(BaseEngine):
                 "sub_strategy_signal": sub_signal,
                 "raw_metrics": sym_raw_metrics,
                 "percentiles": sym_percentiles,
+                "missing_metrics": missing_by_symbol.get(sym, []),
                 "sub_indicators": sub_indicators,
             }
 
         return targets, diagnostics
+
+    @staticmethod
+    def _is_finite(v: Any) -> bool:
+        if v is None:
+            return False
+        try:
+            return bool(np.isfinite(float(v)))
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _metric_percentiles(
+        cls,
+        values: Dict[str, Optional[float]],
+        symbols: List[str],
+        direction: str,
+    ) -> Dict[str, float]:
+        """
+        Percentile (1.0 best .. 0.0 worst) per symbol for one metric.
+
+        Assets with data are ordered by `direction` and get pct = 1 - idx / (n_total - 1).
+        Missing values (None/NaN/inf) get 0.0 so they always rank below any asset with data.
+        Edge cases: no data at all or a single asset -> everyone 0.5 (metric is uninformative).
+        """
+        n_total = len(symbols)
+        valid = [(s, float(values[s])) for s in symbols if cls._is_finite(values.get(s))]
+
+        if n_total <= 1 or not valid:
+            return {s: 0.5 for s in symbols}
+
+        # asc: smaller is better; desc: higher is better. Stable sort keeps input order on ties.
+        ordered = sorted(valid, key=lambda x: x[1], reverse=(direction == "desc"))
+        result = {s: 0.0 for s in symbols}
+        for idx, (sym, _) in enumerate(ordered):
+            result[sym] = 1.0 - idx / float(n_total - 1)
+        return result
 
     @staticmethod
     def _resolve_active_signal_state(sigs: pd.Series, ind: Any) -> int:
