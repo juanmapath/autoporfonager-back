@@ -124,6 +124,7 @@ def open_positions(portfolio, refresh: bool = True) -> dict:
         rows.append({
             "strategy_id": p.strategy_id,
             "strategy": p.strategy.name,
+            "is_cash_sweep": p.strategy.kind == "cash_sweep",
             "instrument": p.instrument.symbol,
             "qty": p.qty,
             "avg_cost": p.avg_cost,

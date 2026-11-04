@@ -848,13 +848,21 @@ def record_sleeve_pnl(portfolio, as_of: date, equity: Decimal) -> int:
     """
     from apps.accounting.models import SleevePnlDaily
     from apps.accounting.sleeves import (
-        ensure_sleeve_accounts, sleeve_diagnostics, external_flows,
+        ensure_sleeve_accounts, sleeve_diagnostics, external_flows, sleeve_values,
     )
 
     ensure_sleeve_accounts(portfolio, equity=equity)
     diag = sleeve_diagnostics(portfolio, equity)
+    sleeves = dict(diag["sleeves"])
+    # El cash sweep no tiene Allocation, pero su rendimiento tambien se atribuye dia a dia:
+    # pnl = variacion de valor de mercado - compras netas + dividendos netos.
+    sweep = Strategy.objects.filter(kind="cash_sweep").first()
+    if sweep:
+        sweep_info = sleeve_values(portfolio).get(sweep.id)
+        if sweep_info and (sweep_info["cash"] != 0 or sweep_info["positions_value"] != 0):
+            sleeves[sweep.id] = sweep_info
     written = 0
-    for strategy_id, info in diag["sleeves"].items():
+    for strategy_id, info in sleeves.items():
         prev = SleevePnlDaily.objects.filter(
             portfolio=portfolio, strategy_id=strategy_id, date__lt=as_of,
         ).order_by("-date").first()
@@ -862,7 +870,10 @@ def record_sleeve_pnl(portfolio, as_of: date, equity: Decimal) -> int:
         pnl = info["value"] - (prev.sleeve_value if prev else Decimal("0")) - flows
         SleevePnlDaily.objects.update_or_create(
             portfolio=portfolio, strategy_id=strategy_id, date=as_of,
-            defaults={"sleeve_value": quantize_amount(info["value"]), "pnl": quantize_amount(pnl)},
+            defaults={
+                "sleeve_value": quantize_amount(info["value"]), "pnl": quantize_amount(pnl),
+                "positions_value": quantize_amount(info["positions_value"]),
+            },
         )
         written += 1
     if diag["sleeves"]:

@@ -117,6 +117,8 @@ class SleevePnlDaily(TimeStampedModel):
     date = models.DateField(db_index=True)
     pnl = models.DecimalField(max_digits=16, decimal_places=2, default=0)
     sleeve_value = models.DecimalField(max_digits=16, decimal_places=2, default=0)
+    # Valor de mercado de las posiciones de la manga ese dia (para saldos promedio, p. ej. el cash sweep)
+    positions_value = models.DecimalField(max_digits=16, decimal_places=2, default=0)
 
     class Meta:
         unique_together = ("portfolio", "strategy", "date")

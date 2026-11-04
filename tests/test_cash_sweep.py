@@ -167,3 +167,57 @@ def test_plan_sweep_disabled_or_leveraged_liquidates_even_below_min_trade():
         plan = plan_sweep(equity=D("10000"), buffer_pct=D("0.02"), min_trade_usd=D("500"),
                           price=D("100"), actual_qty=D("1"), bot_buys_value=D("0"), **kw)
         assert plan.target_qty == 0 and plan.delta_qty == D("-1") and plan.reason == "cash_sweep_out"
+
+
+# ---------- H3: atribucion y metricas ----------
+
+@pytest.mark.django_db
+def test_sweep_pnl_attribution_and_metrics_include_price_and_dividends():
+    from apps.accounting.dividends import record_dividend
+    from apps.accounting.models import EquitySnapshot, SleevePnlDaily
+    from apps.accounting.services import portfolio_equity
+    from apps.accounting.sweep_metrics import cash_sweep_metrics
+    from apps.trading.tasks import record_sleeve_pnl
+
+    p, s, v, inst, sgov = _sweep_portfolio(exposure="0")
+    _run(p)  # compra 98 SGOV
+    d1 = timezone.now().date()
+    d2 = d1 + timedelta(days=1)
+    EquitySnapshot.objects.create(portfolio=p, date=d1, total_equity=D("10000"))
+
+    record_sleeve_pnl(p, d1, portfolio_equity(p)["equity"])
+    sweep = get_sweep_strategy()
+    first = SleevePnlDaily.objects.get(portfolio=p, strategy=sweep, date=d1)
+    assert first.pnl == 0 and first.positions_value == D("9800.00")
+
+    _set_price(sgov, "100.10")  # +0.10 x 98
+    record_dividend(p, sweep.id, D("29.40"), d2, "div:test")  # 98 x 0.30
+    record_sleeve_pnl(p, d2, portfolio_equity(p)["equity"])
+    second = SleevePnlDaily.objects.get(portfolio=p, strategy=sweep, date=d2)
+    assert second.pnl == D("39.20")  # delta de precio 9.80 + dividendo 29.40, sin compras
+
+    m = cash_sweep_metrics(p)
+    assert m["cumulative_pnl_usd"] == 39.2
+    assert m["current_balance"] == 9809.8
+    assert m["average_balance"] == round((9800 + 9809.8) / 2, 2)
+    assert m["days"] == 2
+    assert m["annualized_return_pct"] == round(39.2 / ((9800 + 9809.8) / 2) * 252 / 2 * 100, 2)
+    assert m["contribution_bps"] == 39.2  # 39.2 / 10,000 en bps
+
+
+@pytest.mark.django_db
+def test_cash_sweep_endpoint_and_positions_label():
+    from rest_framework.test import APIClient
+    from apps.accounting.services import open_positions
+
+    p, *_ = _sweep_portfolio(exposure="0")
+    _run(p)
+    client = APIClient()
+    client.force_authenticate(p.user)
+    res = client.get(f"/api/v1/portfolios/{p.id}/cash-sweep/")
+    assert res.status_code == 200, res.content
+    assert res.json()["enabled"] is True and res.json()["symbol"] == "SGOV"
+    assert res.json()["current_balance"] == 9800.0
+
+    rows = open_positions(p, refresh=False)["positions"]
+    assert [r["is_cash_sweep"] for r in rows] == [True]

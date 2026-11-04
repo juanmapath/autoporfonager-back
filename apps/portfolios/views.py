@@ -306,6 +306,12 @@ class PortfolioViewSet(viewsets.ModelViewSet):
             "targets": preview_targets,
         })
 
+    @action(detail=True, methods=["get"], url_path="cash-sweep")
+    def cash_sweep(self, request, pk=None):
+        """Saldo y rendimiento del cash sweep (T-bills) del portafolio."""
+        from apps.accounting.sweep_metrics import cash_sweep_metrics
+        return Response(cash_sweep_metrics(self.get_object()))
+
     @action(detail=True, methods=["get"], url_path="drift")
     def drift(self, request, pk=None):
         """Calculates current drift and whether rebalancing threshold is exceeded."""
