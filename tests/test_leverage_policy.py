@@ -345,3 +345,55 @@ def test_ranked_engine_without_policy_keeps_legacy_behaviour_and_reports_leverag
     _, diag = RankedAllocationEngine().compute_signal({"AAA": df}, {**params, **pol, "_regime_series": series}, {})
     assert diag["AAA"]["leverage"]["leverage_policy"] == "regime_pf" and diag["AAA"]["applied_leverage"] == 2.0
     assert diag["AAA"]["regime_state"].startswith("regime_pf:")
+
+
+# ---------- H4: report, serializer, diagnosticos ----------
+
+def test_regime_durations_counts_runs_and_calendar_days():
+    from apps.strategies.regimes.report import regime_durations
+
+    idx = pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05", "2024-01-08"])
+    s = pd.Series(["A", "A", "B", "A", "A", "A"], index=idx)
+    d = regime_durations(s)
+    assert d["A"]["runs"] == 2 and d["A"]["avg_market_days"] == pytest.approx(2.5)
+    assert d["B"]["runs"] == 1 and d["B"]["avg_market_days"] == 1 and d["B"]["avg_calendar_days"] == 1
+    assert d["A"]["pct_of_time"] + d["B"]["pct_of_time"] == pytest.approx(100)
+
+
+def test_leverage_policy_serializer_validation():
+    from rest_framework import serializers
+    from apps.strategies.serializers import validate_leverage_policy
+
+    ok = validate_leverage_policy({"type": "regime_pf", "providers": ["macro"], "min_trades": 5})
+    assert ok["type"] == "regime_pf"
+    assert validate_leverage_policy(None) is None
+    for bad in ({"type": "magic"}, {"type": "regime_pf", "providers": ["hmm"]}, {"type": "regime_pf", "combine": "max"}):
+        with pytest.raises(serializers.ValidationError):
+            validate_leverage_policy(bad)
+
+
+def test_engines_report_leverage_info_and_regime_pf_flows_through_single_signal(monkeypatch):
+    from decimal import Decimal
+    from apps.strategies.engines import single_signal
+    from apps.strategies.engines.single_signal import SingleSignalEngine
+
+    df, sig = make_series(3, n=900)
+    sig = sig.copy()
+    sig.iloc[-1] = 0
+    # asegura trade abierto al final (el ultimo pulso de la serie sintetica es de entrada)
+    state = pulses_to_long_state(sig)
+    if not state.iloc[-1]:
+        sig.iloc[-5] = 1
+    monkeypatch.setitem(single_signal.STRATEGY_MAP, "Fake", lambda d, p: (sig, pd.DataFrame(index=d.index)))
+    labels = pd.Series(["R_1_0_0"] * len(df), index=df.index)
+    params = {
+        "strategy_name": "Fake", "leverage": 1.0, "max_leverage": 2.0, "use_regimes": True,
+        "leverage_policy": {"type": "regime_pf", "min_trades": 3, "lookback_years": None},
+        "_regime_series": {"macro": labels},
+    }
+    targets, diag = SingleSignalEngine().compute_signal({"X": df}, params, {"X": Decimal("1")})
+    d = diag["X"]
+    assert d["is_long"]
+    assert d["leverage"]["leverage_policy"] == "regime_pf"
+    assert d["leverage"]["providers"]["macro"]["regime"] == "R_1_0_0"
+    assert targets["X"] == Decimal(str(round(d["applied_leverage"], 4)))

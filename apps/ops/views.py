@@ -210,6 +210,9 @@ class OpsBacktestView(APIView):
         base_leverage = float(request.data.get("leverage") or request.data.get("base_leverage") or 1.0)
         max_leverage = float(request.data.get("max_leverage") or base_leverage)
         use_dynamic_leverage = bool(request.data.get("use_dynamic_leverage", request.data.get("use_regimes", False)))
+        # Sin flag explicito, un bot guardado usa la politica de su version (fixed / global_pf / regime_pf)
+        explicit_dynamic = "use_dynamic_leverage" in request.data or "use_regimes" in request.data
+        leverage_policy = request.data.get("leverage_policy") or None
 
         v = (strat.versions.filter(status="live").first() or strat.versions.order_by("-version").first()) if strat else None
 
@@ -248,6 +251,7 @@ class OpsBacktestView(APIView):
                     use_dynamic_leverage=use_dynamic_leverage,
                     periodic_deposit=periodic_deposit,
                     deposit_frequency=deposit_frequency,
+                    leverage_policy=leverage_policy,
                 )
             else:
                 res = engine.run_for_strategy(
@@ -256,7 +260,8 @@ class OpsBacktestView(APIView):
                     end_date=end_date,
                     leverage=base_leverage,
                     max_leverage=max_leverage,
-                    use_dynamic_leverage=use_dynamic_leverage,
+                    use_dynamic_leverage=use_dynamic_leverage if explicit_dynamic else None,
+                    leverage_policy=leverage_policy,
                     periodic_deposit=periodic_deposit,
                     deposit_frequency=deposit_frequency,
                 )

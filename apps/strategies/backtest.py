@@ -86,11 +86,13 @@ class BacktestEngine:
         periodic_deposit: Optional[float] = None,
         deposit_frequency: Optional[str] = None,
         leverage_policy: Optional[Dict[str, Any]] = None,
+        regime_series: Optional[Dict[str, pd.Series]] = None,
+        version=None,
     ) -> Dict[str, Any]:
         """
         Ejecuta el backtest histórico completo de un Bot (Strategy) de la base de datos.
         """
-        version = strategy.versions.filter(status="live").first() or strategy.versions.order_by("-version").first()
+        version = version or strategy.versions.filter(status="live").first() or strategy.versions.order_by("-version").first()
         if not version:
             raise ValueError(f"El bot '{strategy.name}' no tiene versiones de estrategia registradas.")
 
@@ -131,6 +133,7 @@ class BacktestEngine:
             max_leverage=strat_max_lev,
             use_dynamic_leverage=strat_dyn,
             leverage_policy=leverage_policy,
+            regime_series=regime_series,
             strategy_params=params,
             periodic_deposit=strat_deposit,
             deposit_frequency=strat_freq,

@@ -1,5 +1,7 @@
 from rest_framework import serializers
 from apps.strategies.models import Strategy, StrategyVersion, StrategyInstrument, BacktestRun
+from apps.strategies.regimes import REGIME_PROVIDERS
+from apps.strategies.signals.sizing import POLICY_REGIME_PF, resolve_leverage_policy
 
 
 class StrategyInstrumentSerializer(serializers.ModelSerializer):
@@ -22,6 +24,8 @@ class StrategySerializer(serializers.ModelSerializer):
     versions = StrategyVersionSerializer(many=True, read_only=True)
     live_version = serializers.SerializerMethodField()
     current_signals = serializers.SerializerMethodField()
+    leverage_policy = serializers.SerializerMethodField()
+    current_regime = serializers.SerializerMethodField()
 
     class Meta:
         model = Strategy
@@ -29,8 +33,27 @@ class StrategySerializer(serializers.ModelSerializer):
             "id", "slug", "name", "family", "kind", "engine",
             "timeframe", "decision_offset_minutes",
             "is_active", "signal_only", "versions", "live_version",
-            "current_signals",
+            "current_signals", "leverage_policy", "current_regime",
         ]
+
+    def get_leverage_policy(self, obj):
+        v = obj.versions.filter(status="live").first()
+        return resolve_leverage_policy(v.params).to_dict() if v else None
+
+    def get_current_regime(self, obj):
+        """Ultimo regimen guardado de cada proveedor de la politica regime_pf del bot (None si no la usa)."""
+        from apps.strategies.models import RegimeSnapshot
+        v = obj.versions.filter(status="live").first()
+        if not v:
+            return None
+        policy = resolve_leverage_policy(v.params)
+        if policy.type != POLICY_REGIME_PF:
+            return None
+        out = {}
+        for key in policy.providers:
+            snap = RegimeSnapshot.objects.filter(provider=key).order_by("-date").first()
+            out[key] = {"label": snap.label, "date": snap.date, "features": snap.features} if snap else None
+        return out
 
     def get_live_version(self, obj):
         v = obj.versions.filter(status="live").first()
@@ -56,6 +79,28 @@ class StrategySerializer(serializers.ModelSerializer):
                     "diagnostics": sig.diagnostics,
                 })
         return signals
+
+
+def validate_leverage_policy(value):
+    """Valida un `leverage_policy` (tipo, combine, proveedores registrados)."""
+    if not value:
+        return None
+    try:
+        policy = resolve_leverage_policy({"leverage_policy": value})
+    except ValueError as e:
+        raise serializers.ValidationError(str(e))
+    unknown = [p for p in policy.providers if p not in REGIME_PROVIDERS]
+    if unknown:
+        raise serializers.ValidationError(
+            f"Proveedor(es) de regimen no disponibles: {', '.join(unknown)}. Disponibles: {', '.join(REGIME_PROVIDERS)}."
+        )
+    return dict(value)
+
+
+def _leverage_policy_params(validated_data) -> dict:
+    """`leverage_policy` solo se guarda si se definio (sin ella: use_regimes -> global_pf, si no fixed)."""
+    value = validated_data.get("leverage_policy")
+    return {"leverage_policy": value} if value else {}
 
 
 REBALANCE_FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "quarterly_earnings", "never"]
@@ -99,7 +144,11 @@ class BotCreateSerializer(serializers.Serializer):
     leverage = serializers.FloatField(default=1.0)
     max_leverage = serializers.FloatField(default=1.0)
     use_regimes = serializers.BooleanField(default=False)
+    leverage_policy = serializers.DictField(required=False, allow_null=True, default=None)
     decision_offset_minutes = serializers.IntegerField(default=25)
+
+    def validate_leverage_policy(self, value):
+        return validate_leverage_policy(value)
 
     def validate(self, data):
         bot_type = data.get("bot_type")
@@ -227,6 +276,7 @@ class BotCreateSerializer(serializers.Serializer):
             "leverage": validated_data.get("leverage", 1.0),
             "max_leverage": validated_data.get("max_leverage", 1.0),
             "use_regimes": validated_data.get("use_regimes", False),
+            **_leverage_policy_params(validated_data),
         }
 
         version = StrategyVersion.objects.create(
@@ -312,6 +362,7 @@ class BotCreateSerializer(serializers.Serializer):
             "leverage": validated_data.get("leverage", 1.0),
             "max_leverage": validated_data.get("max_leverage", 1.0),
             "use_regimes": validated_data.get("use_regimes", False),
+            **_leverage_policy_params(validated_data),
         }
 
         new_version = StrategyVersion.objects.create(
