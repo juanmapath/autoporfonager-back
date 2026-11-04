@@ -20,6 +20,19 @@ def _jsonable(row: dict) -> dict:
     return {k: (float(round(v, 6)) if isinstance(v, Decimal) else v) for k, v in row.items()}
 
 
+def _paginate(request, items, default_size=20, max_size=100):
+    """Pagina `items` si la petición trae ?page=; sin ese parámetro devuelve la lista completa."""
+    if "page" not in request.query_params:
+        return None
+    try:
+        page = max(int(request.query_params.get("page", 1)), 1)
+        size = min(max(int(request.query_params.get("page_size", default_size)), 1), max_size)
+    except ValueError:
+        page, size = 1, default_size
+    start = (page - 1) * size
+    return {"count": len(items), "page": page, "page_size": size, "items": items[start:start + size]}
+
+
 class MeView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
@@ -221,17 +234,34 @@ class PortfolioViewSet(viewsets.ModelViewSet):
                 "reference": e.reference,
             })
         total = sum(r["amount"] for r in rows)
+        paged = _paginate(request, rows)
+        if paged:
+            return Response({
+                "contributions": paged["items"], "total": round(total, 2),
+                "count": paged["count"], "page": paged["page"], "page_size": paged["page_size"],
+            })
         return Response({"contributions": rows, "total": round(total, 2)})
 
     @action(detail=True, methods=["get"])
     def orders(self, request, pk=None):
         portfolio = self.get_object()
-        orders = (
+        qs = (
             Order.objects.filter(portfolio=portfolio)
             .select_related("instrument")
             .prefetch_related("fills")
-            .order_by("-created_at")[:50]
+            .order_by("-created_at")
         )
+        paged = "page" in request.query_params
+        if paged:
+            try:
+                page = max(int(request.query_params.get("page", 1)), 1)
+                size = min(max(int(request.query_params.get("page_size", 20)), 1), 100)
+            except ValueError:
+                page, size = 1, 20
+            count = qs.count()
+            orders = qs[(page - 1) * size: page * size]
+        else:
+            orders = qs[:50]
         data = []
         for o in orders:
             fills = list(o.fills.all())
@@ -250,6 +280,8 @@ class PortfolioViewSet(viewsets.ModelViewSet):
                 "status": o.status,
                 "created_at": o.created_at,
             })
+        if paged:
+            return Response({"count": count, "page": page, "page_size": size, "results": data})
         return Response(data)
 
     @action(detail=True, methods=["post"], url_path="rebalance-preview")
