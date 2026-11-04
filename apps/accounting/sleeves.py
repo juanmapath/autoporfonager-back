@@ -18,6 +18,7 @@ from django.db.models import Sum
 
 from apps.accounting.models import LogicalPosition, SleeveCashEntry
 from apps.accounting.services import get_current_prices
+from apps.strategies.models import Strategy
 
 ZERO = Decimal("0")
 
@@ -126,6 +127,8 @@ def allocate_cash_flow(portfolio, amount: Decimal, effective_date: Optional[date
 def release_disabled_sleeves(portfolio, reference: str = "disabled_sleeve") -> None:
     """La caja de una manga deshabilitada y sin posiciones vuelve a 'no asignada'."""
     enabled = set(portfolio.allocations.filter(enabled=True).values_list("strategy_id", flat=True))
+    # El cash sweep es una estrategia de sistema sin Allocation: su caja es su propio rendimiento.
+    enabled |= set(Strategy.objects.filter(kind="cash_sweep").values_list("id", flat=True))
     for sid, v in sleeve_values(portfolio).items():
         if sid not in enabled and v["positions_value"] == 0 and v["cash"] != 0:
             add_entry(portfolio, sid, "transfer", -v["cash"], reference=reference)

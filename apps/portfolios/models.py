@@ -83,6 +83,13 @@ class Portfolio(TimeStampedModel):
     paper_commission_model = models.JSONField(default=dict, blank=True)
     follows = models.ForeignKey(RecommendedPortfolio, on_delete=models.SET_NULL, null=True, blank=True)
     rebalance_pending = models.BooleanField(default=False)
+    # Cash sweep: invierte en T-bills el efectivo libre (ver apps/trading/cash_sweep.py)
+    cash_sweep_enabled = models.BooleanField(default=False)
+    cash_sweep_symbol = models.CharField(
+        max_length=16, default="SGOV", choices=(("SGOV", "SGOV"), ("BIL", "BIL"), ("USFR", "USFR")),
+    )
+    cash_sweep_buffer_pct = models.DecimalField(max_digits=7, decimal_places=4, default=0.0200)
+    cash_sweep_min_trade_usd = models.DecimalField(max_digits=12, decimal_places=2, default=500)
 
     class Meta:
         constraints = [

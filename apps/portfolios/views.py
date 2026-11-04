@@ -318,7 +318,7 @@ class StrategyCatalogView(APIView):
 
     def get(self, request):
         from apps.strategies.signals.metadata import BOT_CATALOG, STRATEGIES_CATALOG
-        strategies = Strategy.objects.filter(is_active=True).prefetch_related("versions")
+        strategies = Strategy.objects.filter(is_active=True).exclude(kind="cash_sweep").prefetch_related("versions")
         return Response({
             "instances": StrategySerializer(strategies, many=True).data,
             "bot_types": BOT_CATALOG,

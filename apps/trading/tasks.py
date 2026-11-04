@@ -18,6 +18,7 @@ from apps.trading.allocator import PortfolioAllocator
 from apps.trading.execution import OrderDispatcher
 from apps.trading.guards import skip_if_not_trading_day
 from apps.trading.universe import pipeline_universe
+from apps.trading.cash_sweep import order_intent_ids_sells_first
 from apps.trading.pipeline import (
     get_or_create_today_pipeline, pipeline_step, record_timing, step_lock, step_skip_reason, update_pipeline,
 )
@@ -448,7 +449,8 @@ def dispatch_moc_and_manual_orders():
     dispatched_count = 0
 
     for run in active_runs:
-        for intent_id in list(run.intents.filter(status="pending").values_list("id", flat=True)):
+        # Ventas primero (las del cash sweep antes que las demas), luego las compras.
+        for intent_id in order_intent_ids_sells_first(run):
             if dispatch_pending_intent(dispatcher, intent_id):
                 dispatched_count += 1
         # No pisar estados terminales fijados durante el despacho (p. ej. missed_cutoff)

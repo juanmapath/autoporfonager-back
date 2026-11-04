@@ -13,6 +13,9 @@ from apps.trading.rebalance_policy import (
     needs_portfolio_reset, decide_position_trade,
 )
 from core.market_time import NY_TZ
+from apps.trading.cash_sweep import (
+    SWEEP_KIND, get_sweep_strategy, ensure_sweep_instrument, plan_sweep,
+)
 from core.money import quantize_qty
 
 
@@ -244,7 +247,9 @@ class PortfolioAllocator:
         stranded_positions = LogicalPosition.objects.filter(
             portfolio=portfolio,
             qty__gt=0,
-        ).exclude(strategy_id__in=processed_strategy_ids).select_related("strategy", "instrument", "broker_account")
+        ).exclude(strategy_id__in=processed_strategy_ids).exclude(strategy__kind=SWEEP_KIND).select_related(
+            "strategy", "instrument", "broker_account",
+        )
 
         for pos in stranded_positions:
             broker_acc = pos.broker_account or portfolio.broker_accounts.filter(trading_enabled=True).first()
@@ -268,6 +273,9 @@ class PortfolioAllocator:
             netting_map[key] = netting_map.get(key, Decimal("0.0")) + delta
             intent_inst_map[key] = (broker_acc, pos.instrument)
 
+        # Cash sweep: free cash goes to T-bills (computed after every bot target is known).
+        targets_created.extend(self._plan_cash_sweep(equity, targets_created, netting_map, intent_inst_map))
+
         # Generate netted OrderIntents
         intents = []
         for (ba_id, inst_id), net_delta in netting_map.items():
@@ -289,3 +297,75 @@ class PortfolioAllocator:
             intents.append(intent)
 
         return intents
+
+    def _plan_cash_sweep(self, equity, bot_targets, netting_map, intent_inst_map) -> List[Target]:
+        """
+        Objetivo del cash sweep (ver cash_sweep.py). Se calcula con la posicion final de TODOS los bots
+        (cantidad actual + delta) para que el efectivo libre nunca compita con una compra de un bot.
+        Con el sweep desactivado solo se liquida lo que quede de el.
+        """
+        portfolio = self.portfolio
+        sweep_positions = list(
+            LogicalPosition.objects.filter(portfolio=portfolio, strategy__kind=SWEEP_KIND, qty__gt=0)
+            .select_related("strategy", "instrument", "broker_account")
+        )
+        if not portfolio.cash_sweep_enabled and not sweep_positions:
+            return []
+
+        strategy = get_sweep_strategy()
+        broker_acc = portfolio.broker_accounts.filter(trading_enabled=True).first()
+        price_cache: Dict[int, Decimal] = {}
+
+        def price_of(inst):
+            if inst.id not in price_cache:
+                lq = LatestQuote.objects.filter(instrument=inst).first()
+                price_cache[inst.id] = lq.price if lq else Decimal("100.00")
+            return price_cache[inst.id]
+
+        long_mv = Decimal("0")
+        bot_buys = Decimal("0")
+        for t in bot_targets:
+            price = price_of(t.instrument)
+            long_mv += (t.current_qty + t.delta_qty) * price
+            if t.delta_qty > 0:
+                bot_buys += t.delta_qty * price
+
+        sweep_symbol = portfolio.cash_sweep_symbol
+        created: List[Target] = []
+
+        def add_target(inst, plan, current_qty, acc):
+            t = Target.objects.create(
+                run=self.run, strategy=strategy, instrument=inst, broker_account=acc,
+                sleeve_capital=plan.target_value, target_qty=plan.target_qty, current_qty=current_qty,
+                delta_qty=plan.delta_qty, reason=plan.reason,
+            )
+            created.append(t)
+            key = (acc.id if acc else None, inst.id)
+            netting_map[key] = netting_map.get(key, Decimal("0.0")) + plan.delta_qty
+            intent_inst_map[key] = (acc, inst)
+
+        # Positions in an ETF that is no longer the configured sweep symbol are liquidated.
+        for pos in sweep_positions:
+            if pos.instrument.symbol != sweep_symbol or not portfolio.cash_sweep_enabled:
+                plan = plan_sweep(
+                    enabled=False, equity=equity, long_mv=long_mv, buffer_pct=Decimal("0"),
+                    min_trade_usd=Decimal("0"), price=price_of(pos.instrument), actual_qty=pos.qty,
+                    bot_buys_value=bot_buys,
+                )
+                add_target(pos.instrument, plan, pos.qty, pos.broker_account or broker_acc)
+
+        if portfolio.cash_sweep_enabled:
+            inst = ensure_sweep_instrument(sweep_symbol)
+            acc = broker_acc
+            pos = LogicalPosition.objects.filter(
+                portfolio=portfolio, strategy=strategy, instrument=inst, broker_account=acc,
+            ).first()
+            actual = pos.qty if pos else Decimal("0")
+            plan = plan_sweep(
+                enabled=True, equity=equity, long_mv=long_mv,
+                buffer_pct=Decimal(str(portfolio.cash_sweep_buffer_pct)),
+                min_trade_usd=Decimal(str(portfolio.cash_sweep_min_trade_usd)),
+                price=price_of(inst), actual_qty=actual, bot_buys_value=bot_buys,
+            )
+            add_target(inst, plan, actual, acc)
+        return created

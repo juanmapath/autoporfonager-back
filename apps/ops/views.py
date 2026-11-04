@@ -20,7 +20,7 @@ class OpsOverviewView(APIView):
         total_portfolios = Portfolio.objects.count()
         live_portfolios = Portfolio.objects.filter(kind="live", status="active").count()
         paper_portfolios = Portfolio.objects.filter(kind="paper", status="active").count()
-        active_strategies = Strategy.objects.filter(is_active=True).count()
+        active_strategies = Strategy.objects.filter(is_active=True).exclude(kind="cash_sweep").count()
         open_alerts = FundingAlert.objects.filter(status="open").count()
         active_kill_switches = KillSwitch.objects.filter(is_active=True).count()
 
@@ -55,7 +55,7 @@ class OpsStrategiesView(APIView):
         from apps.strategies.signals.metadata import BOT_CATALOG
         from apps.strategies.catalog_settings import strategies_catalog_with_availability
         from apps.fundamentals.metrics import get_metrics_catalog
-        strategies = Strategy.objects.all().prefetch_related("versions")
+        strategies = Strategy.objects.exclude(kind="cash_sweep").prefetch_related("versions")
         return Response({
             "strategies": StrategySerializer(strategies, many=True).data,
             "bot_types": BOT_CATALOG,

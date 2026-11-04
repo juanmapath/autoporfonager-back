@@ -72,6 +72,7 @@ class PortfolioSerializer(serializers.ModelSerializer):
         fields = [
             "id", "user", "kind", "name", "base_currency", "status",
             "trading_enabled", "rebalance_frequency", "rebalance_tolerance", "rebalance_tolerance_mode",
+            "cash_sweep_enabled", "cash_sweep_symbol", "cash_sweep_buffer_pct", "cash_sweep_min_trade_usd",
             "max_gross_allocation", "paper_initial_capital",
             "follows", "rebalance_pending", "allocations", "broker_accounts",
             "current_value", "equity_source", "equity_synced_at", "initial_value", "net_contributions", "total_pnl", "total_return_pct", "primary_broker",
