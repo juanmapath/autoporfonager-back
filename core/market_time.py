@@ -61,7 +61,7 @@ def get_decision_window(dt: Optional[date] = None) -> Optional[Tuple[datetime, d
 def is_last_business_day(dt: Optional[date] = None, frequency: str = "monthly") -> bool:
     """
     Evaluates whether the given date is the last trading business day of the period:
-    frequency in ['daily', 'weekly', 'monthly', 'quarterly'].
+    frequency in ['daily', 'weekly', 'monthly', 'quarterly', 'quarterly_earnings'].
     """
     check_date = dt or get_ny_now().date()
     if not is_trading_day(check_date):
@@ -93,6 +93,13 @@ def is_last_business_day(dt: Optional[date] = None, frequency: str = "monthly") 
     if frequency == "quarterly":
         # Quarters end in months 3, 6, 9, 12
         if check_date.month not in [3, 6, 9, 12]:
+            return False
+        return is_last_business_day(check_date, frequency="monthly")
+
+    if frequency == "quarterly_earnings":
+        # Last business day of Feb, May, Aug and Nov: most companies have already filed the
+        # quarter's 10-Q / 6-K (40-45 day deadline), so rankings use fresh fundamentals.
+        if check_date.month not in [2, 5, 8, 11]:
             return False
         return is_last_business_day(check_date, frequency="monthly")
 

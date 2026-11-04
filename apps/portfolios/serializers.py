@@ -9,14 +9,50 @@ class AllocationSerializer(serializers.ModelSerializer):
     strategy_name = serializers.CharField(source="strategy.name", read_only=True)
     strategy_slug = serializers.CharField(source="strategy.slug", read_only=True)
     strategy_detail = StrategySerializer(source="strategy", read_only=True)
+    sleeve_value = serializers.SerializerMethodField()
+    weight_actual = serializers.SerializerMethodField()
+    weight_deviation = serializers.SerializerMethodField()
 
     class Meta:
         model = Allocation
         fields = [
             "id", "portfolio", "strategy", "strategy_name", "strategy_slug", "strategy_detail",
             "target_weight", "broker_account", "enabled",
+            "sleeve_value", "weight_actual", "weight_deviation",
         ]
         read_only_fields = ["id"]
+
+    def _sleeve(self, obj):
+        """Valor de manga y peso real (None si el portafolio aun no tiene contabilidad por manga)."""
+        cache = self.__dict__.setdefault("_sleeve_cache", {})
+        pid = obj.portfolio_id
+        if pid not in cache:
+            from apps.accounting.sleeves import has_sleeve_accounts, sleeve_values
+            from apps.accounting.services import portfolio_equity
+            portfolio = obj.portfolio
+            if not has_sleeve_accounts(portfolio):
+                cache[pid] = None
+            else:
+                cache[pid] = (sleeve_values(portfolio), portfolio_equity(portfolio, refresh=False)["equity"])
+        data = cache[pid]
+        if data is None:
+            return None
+        values, equity = data
+        value = values.get(obj.strategy_id, {}).get("value", Decimal("0"))
+        return value, (value / equity if equity > 0 else Decimal("0"))
+
+    def get_sleeve_value(self, obj):
+        sleeve = self._sleeve(obj)
+        return None if sleeve is None else float(round(sleeve[0], 2))
+
+    def get_weight_actual(self, obj):
+        sleeve = self._sleeve(obj)
+        return None if sleeve is None else float(round(sleeve[1], 4))
+
+    def get_weight_deviation(self, obj):
+        """Desviacion en puntos de peso (actual - objetivo)."""
+        sleeve = self._sleeve(obj)
+        return None if sleeve is None else float(round(sleeve[1] - obj.target_weight, 4))
 
 
 class PortfolioSerializer(serializers.ModelSerializer):
@@ -36,6 +72,7 @@ class PortfolioSerializer(serializers.ModelSerializer):
         fields = [
             "id", "user", "kind", "name", "base_currency", "status",
             "trading_enabled", "rebalance_frequency", "rebalance_tolerance", "rebalance_tolerance_mode",
+            "cash_sweep_enabled", "cash_sweep_symbol", "cash_sweep_buffer_pct", "cash_sweep_min_trade_usd",
             "max_gross_allocation", "paper_initial_capital",
             "follows", "rebalance_pending", "allocations", "broker_accounts",
             "current_value", "equity_source", "equity_synced_at", "initial_value", "net_contributions", "total_pnl", "total_return_pct", "primary_broker",

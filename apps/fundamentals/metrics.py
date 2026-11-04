@@ -5,7 +5,9 @@ This module provides:
 1. Declarative definitions of metrics (direction, source, label, description).
 2. Calculation logic for base & derived fundamentals (TTM rolling sums, YoY growth)
    and price-derived metrics (52w-low, momentum, volatility).
-3. Ranking and percentile scoring with neutral (0.5) fallback for missing data.
+3. Ranking and percentile scoring. Metrics that return None/NaN/inf are 'missing' and the
+   ranking engine places those assets LAST for that metric (percentile 0.0), below any asset
+   with data. (Neutral 0.5 is only used when no asset, or a single asset, has data.)
 """
 from dataclasses import dataclass
 from datetime import date
@@ -76,7 +78,7 @@ def calc_per(ctx: MetricContext) -> Optional[float]:
         return None
     eps = _get_ttm_sum(ctx.statements, "eps_diluted")
     if eps is None or eps <= 0:
-        return None  # Negative/zero earnings treated as worst rank
+        return None  # Negative/zero earnings = missing -> ranking engine puts it last (pct 0.0)
     return float(ctx.price / eps)
 
 

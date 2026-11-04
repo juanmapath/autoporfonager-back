@@ -99,6 +99,14 @@ class Command(BaseCommand):
                 "description": "Compara posiciones lógicas con las posiciones reales en Alpaca (16:10 NY) y alerta por Telegram si difieren.",
             },
             {
+                "name": "[Daily] Paper Dividends Accrual",
+                "task": "accrue_paper_dividends",
+                "minute": "12",
+                "hour": "16",
+                "day_of_week": "1-5",  # Mon-Fri
+                "description": "Acredita dividendos (fecha ex) de las posiciones de portafolios paper antes del snapshot (16:12 NY).",
+            },
+            {
                 "name": "[6/6] Post-Market Daily Equity & Position Snapshot",
                 "task": "accounting_daily_snapshot",
                 "minute": "15",

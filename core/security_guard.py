@@ -20,6 +20,7 @@ PROTECTED_MODELS = {
     "LedgerEntry",
     "EquitySnapshot",
     "SleevePnlDaily",
+    "SleeveCashEntry",
     "BrokerCredential",
     "KillSwitch",
     "FundingAlert",

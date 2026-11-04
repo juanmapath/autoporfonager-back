@@ -6,6 +6,8 @@ from typing import Dict, Any, List, Optional
 # CSD depósito, CSW retiro, JNLC journal de efectivo entre cuentas, TRANS transferencia,
 # ACATC transferencia ACATS de efectivo (entrada o salida).
 CASH_FLOW_ACTIVITY_TYPES = ("CSD", "CSW", "JNLC", "TRANS", "ACATC")
+# Dividendos (DIV) y su retencion para no residentes (DIVNRA): son rendimiento, no aportes de capital.
+DIVIDEND_ACTIVITY_TYPES = ("DIV", "DIVNRA")
 
 
 def _base_url(environment: str) -> str:
@@ -14,6 +16,7 @@ def _base_url(environment: str) -> str:
 
 def get_alpaca_cash_activities(
     api_key: str, secret_key: str, environment: str = "paper", after: Optional[date] = None,
+    activity_types: tuple = CASH_FLOW_ACTIVITY_TYPES,
 ) -> List[Dict[str, Any]]:
     """
     Descarga de /v2/account/activities los depósitos, retiros y journals de efectivo
@@ -21,7 +24,7 @@ def get_alpaca_cash_activities(
     """
     headers = {"APCA-API-KEY-ID": api_key.strip(), "APCA-API-SECRET-KEY": secret_key.strip()}
     params: Dict[str, Any] = {
-        "activity_types": ",".join(CASH_FLOW_ACTIVITY_TYPES),
+        "activity_types": ",".join(activity_types),
         "direction": "asc",
         "page_size": 100,
     }

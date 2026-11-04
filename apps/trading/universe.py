@@ -22,4 +22,7 @@ def pipeline_universe() -> QuerySet:
     """
     ids = live_strategy_instrument_ids()
     ids |= set(LogicalPosition.objects.filter(~Q(qty=0)).values_list("instrument_id", flat=True))
+    # ETF del cash sweep de los portafolios que lo tienen activo (historial completo y cotizacion diaria)
+    from apps.trading.cash_sweep import sweep_instrument_ids
+    ids |= sweep_instrument_ids()
     return Instrument.objects.filter(id__in=ids).order_by("id")

@@ -12,6 +12,7 @@ class RecommendedPortfolio(TimeStampedModel):
         ("weekly", "Weekly (Last business day)"),
         ("monthly", "Monthly (Last business day)"),
         ("quarterly", "Quarterly (Last business day)"),
+        ("quarterly_earnings", "Quarterly after earnings (Feb/May/Aug/Nov, last business day)"),
         ("never", "Never / Signal Trigger Only"),
     )
     TOLERANCE_MODE_CHOICES = (
@@ -60,6 +61,7 @@ class Portfolio(TimeStampedModel):
         ("weekly", "Weekly (Last business day)"),
         ("monthly", "Monthly (Last business day)"),
         ("quarterly", "Quarterly (Last business day)"),
+        ("quarterly_earnings", "Quarterly after earnings (Feb/May/Aug/Nov, last business day)"),
         ("never", "Never / Signal Trigger Only"),
     )
     TOLERANCE_MODE_CHOICES = (
@@ -81,6 +83,13 @@ class Portfolio(TimeStampedModel):
     paper_commission_model = models.JSONField(default=dict, blank=True)
     follows = models.ForeignKey(RecommendedPortfolio, on_delete=models.SET_NULL, null=True, blank=True)
     rebalance_pending = models.BooleanField(default=False)
+    # Cash sweep: invierte en T-bills el efectivo libre (ver apps/trading/cash_sweep.py)
+    cash_sweep_enabled = models.BooleanField(default=False)
+    cash_sweep_symbol = models.CharField(
+        max_length=16, default="SGOV", choices=(("SGOV", "SGOV"), ("BIL", "BIL"), ("USFR", "USFR")),
+    )
+    cash_sweep_buffer_pct = models.DecimalField(max_digits=7, decimal_places=4, default=0.0200)
+    cash_sweep_min_trade_usd = models.DecimalField(max_digits=12, decimal_places=2, default=500)
 
     class Meta:
         constraints = [
@@ -140,6 +149,13 @@ class Portfolio(TimeStampedModel):
 
         effective_equity = max(total_equity, total_positions_val)
 
+        # With per-sleeve cash accounting a sleeve is worth its cash + positions (it floats with its own PnL).
+        from apps.accounting.sleeves import has_sleeve_accounts, sleeve_values as _sleeve_values
+        if has_sleeve_accounts(self):
+            accounted = _sleeve_values(self)
+            sleeve_values = {a.id: accounted.get(a.strategy_id, {}).get("value", Decimal("0.0")) for a in allocations}
+            effective_equity = total_equity
+
         for alloc in allocations:
             current_val = sleeve_values.get(alloc.id, Decimal("0.0"))
             current_weight = current_val / effective_equity if effective_equity > Decimal("0") else Decimal("0")
@@ -165,6 +181,7 @@ class Portfolio(TimeStampedModel):
                 "target_weight": float(target_weight),
                 "target_value": float(target_val),
                 "current_value": float(current_val),
+                "sleeve_value": float(current_val),
                 "current_weight": float(round(current_weight, 4)),
                 "absolute_drift": float(round(abs_drift, 4)),
                 "relative_drift": float(round(rel_drift, 4)),

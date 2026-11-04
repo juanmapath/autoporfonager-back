@@ -32,7 +32,7 @@ class RegisterView(APIView):
             )
 
             # Assign default starter strategies if available
-            strategies = Strategy.objects.filter(is_active=True)[:2]
+            strategies = Strategy.objects.filter(is_active=True).exclude(kind="cash_sweep")[:2]
             if strategies.count() >= 2:
                 Allocation.objects.create(portfolio=paper_port, strategy=strategies[0], target_weight=0.5000)
                 Allocation.objects.create(portfolio=paper_port, strategy=strategies[1], target_weight=0.5000)

@@ -306,6 +306,12 @@ class PortfolioViewSet(viewsets.ModelViewSet):
             "targets": preview_targets,
         })
 
+    @action(detail=True, methods=["get"], url_path="cash-sweep")
+    def cash_sweep(self, request, pk=None):
+        """Saldo y rendimiento del cash sweep (T-bills) del portafolio."""
+        from apps.accounting.sweep_metrics import cash_sweep_metrics
+        return Response(cash_sweep_metrics(self.get_object()))
+
     @action(detail=True, methods=["get"], url_path="drift")
     def drift(self, request, pk=None):
         """Calculates current drift and whether rebalancing threshold is exceeded."""
@@ -318,7 +324,7 @@ class StrategyCatalogView(APIView):
 
     def get(self, request):
         from apps.strategies.signals.metadata import BOT_CATALOG, STRATEGIES_CATALOG
-        strategies = Strategy.objects.filter(is_active=True).prefetch_related("versions")
+        strategies = Strategy.objects.filter(is_active=True).exclude(kind="cash_sweep").prefetch_related("versions")
         return Response({
             "instances": StrategySerializer(strategies, many=True).data,
             "bot_types": BOT_CATALOG,

@@ -1,7 +1,7 @@
 import requests
 import time
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 import pandas as pd
 
 
@@ -36,6 +36,33 @@ class YahooProvider:
         res = self.session.get(url, params=params, timeout=15)
         res.raise_for_status()
         return self._parse_chart_json(res.json(), symbol)
+
+    def get_dividends(self, symbol: str, start_dt: datetime) -> List[Dict[str, Any]]:
+        """Cash dividends since start_dt: [{"ex_date": date, "amount": float}] (Yahoo reports the ex-dividend date)."""
+        params = {
+            "period1": int(start_dt.timestamp()),
+            "period2": int(datetime.now(timezone.utc).timestamp()),
+            "interval": "1d",
+            "events": "div",
+        }
+        res = self.session.get(self.BASE_CHART_URL.format(symbol=symbol), params=params, timeout=15)
+        res.raise_for_status()
+        return self._parse_dividends(res.json())
+
+    @staticmethod
+    def _parse_dividends(raw_json: dict) -> List[Dict[str, Any]]:
+        result = raw_json["chart"]["result"][0]
+        events = (result.get("events") or {}).get("dividends") or {}
+        out = []
+        for ev in events.values():
+            amount = ev.get("amount")
+            if amount is None or not ev.get("date"):
+                continue
+            out.append({
+                "ex_date": datetime.fromtimestamp(ev["date"], tz=timezone.utc).date(),
+                "amount": float(amount),
+            })
+        return sorted(out, key=lambda d: d["ex_date"])
 
     def get_latest_quote(self, symbol: str) -> Dict[str, Any]:
         """Gets current regular market price and timestamp."""

@@ -218,8 +218,15 @@ class OrderDispatcher:
         fill_ratio = signed_fill / net_delta
         portfolio = intent.run.portfolio
 
-        for target in targets:
-            allocated = quantize_qty(target.delta_qty * fill_ratio, round_down=False)
+        # Contabilidad por manga: antes de mover posiciones, garantizar que la manga tiene su caja inicial.
+        from apps.accounting.sleeves import ensure_sleeve_accounts, record_fill_entries
+        ensure_sleeve_accounts(portfolio, equity=intent.run.equity_base)
+
+        allocations = [(t, quantize_qty(t.delta_qty * fill_ratio, round_down=False)) for t in targets]
+        total_abs_alloc = sum((abs(a) for _, a in allocations), Decimal("0"))
+        commission = fill.commission or Decimal("0")
+
+        for target, allocated in allocations:
             if allocated == 0:
                 continue
 
@@ -228,6 +235,8 @@ class OrderDispatcher:
                 strategy=target.strategy,
                 allocated_qty=allocated,
             )
+            share = (commission * abs(allocated) / total_abs_alloc) if total_abs_alloc else Decimal("0")
+            record_fill_entries(portfolio, target.strategy_id, allocated, price, share, reference=f"fill:{fill.id}")
             pos, _ = LogicalPosition.objects.get_or_create(
                 portfolio=portfolio,
                 broker_account=target.broker_account,

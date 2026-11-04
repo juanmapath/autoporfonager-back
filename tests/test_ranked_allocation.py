@@ -154,3 +154,102 @@ def test_ranked_allocation_per_asset_regime_leverage_hold_mode():
     assert targets["WEAK"] == Decimal("0.40")
 
 
+
+
+# ---------------------------------------------------------------------------
+# F1: missing data ranks last
+# ---------------------------------------------------------------------------
+from apps.fundamentals.metrics import MetricDef
+
+NAN = float("nan")
+INF = float("inf")
+
+
+def _pcts(values, direction="desc"):
+    syms = list(values.keys())
+    return RankedAllocationEngine._metric_percentiles(values, syms, direction)
+
+
+def test_pct_all_valid_matches_legacy_formula():
+    vals = {"A": 5.0, "B": 4.0, "C": 3.0, "D": 2.0, "E": 1.0}
+    pct = _pcts(vals, "desc")
+    assert [pct[s] for s in "ABCDE"] == [1.0, 0.75, 0.5, 0.25, 0.0]
+    pct_asc = _pcts(vals, "asc")
+    assert [pct_asc[s] for s in "EDCBA"] == [1.0, 0.75, 0.5, 0.25, 0.0]
+
+
+def test_pct_two_missing_go_last():
+    vals = {"A": 10.0, "B": 20.0, "C": 30.0, "D": None, "E": None}
+    pct = _pcts(vals, "asc")  # lower is better
+    assert (pct["A"], pct["B"], pct["C"]) == (1.0, 0.75, 0.5)
+    assert pct["D"] == 0.0 and pct["E"] == 0.0
+
+
+@pytest.mark.parametrize("direction", ["asc", "desc"])
+def test_pct_missing_last_both_directions(direction):
+    vals = {"A": 1.0, "B": 2.0, "C": None}
+    pct = _pcts(vals, direction)
+    assert pct["C"] == 0.0
+    assert min(pct["A"], pct["B"]) > pct["C"]
+
+
+def test_pct_single_valid_of_four():
+    pct = _pcts({"A": 1.0, "B": None, "C": None, "D": None})
+    assert pct == {"A": 1.0, "B": 0.0, "C": 0.0, "D": 0.0}
+
+
+def test_pct_no_valid_all_neutral():
+    assert set(_pcts({"A": None, "B": NAN, "C": INF}).values()) == {0.5}
+
+
+def test_pct_single_asset_neutral():
+    assert _pcts({"A": 3.0}) == {"A": 0.5}
+
+
+def test_pct_inf_and_nan_treated_as_missing():
+    pct = _pcts({"A": 1.0, "B": INF, "C": -INF, "D": NAN, "E": 2.0}, "desc")
+    assert pct["E"] == 1.0 and pct["A"] == 0.75
+    assert pct["B"] == pct["C"] == pct["D"] == 0.0
+
+
+def _patch_metrics(monkeypatch, data):
+    """data: {metric_key: {symbol: value}} -> registers fake metrics (desc)."""
+    reg = {}
+    for key, per_sym in data.items():
+        reg[key] = MetricDef(
+            key=key, label=key, direction="desc", source="fundamental", description="",
+            fn=(lambda ctx, per_sym=per_sym: per_sym.get(ctx.instrument.symbol)),
+        )
+    monkeypatch.setattr("apps.strategies.engines.ranked_allocation.METRIC_REGISTRY", reg)
+
+
+def _ohlcv(symbols):
+    dates = pd.date_range("2024-01-01", periods=20)
+    return {s: pd.DataFrame({"Close": [10.0] * 20}, index=dates) for s in symbols}
+
+
+@pytest.mark.django_db
+def test_engine_missing_metric_lowers_rank_and_reports_it(monkeypatch):
+    for s in ("AAA", "BBB", "CCC"):
+        Instrument.objects.create(symbol=s, name=s, asset_class="equity")
+    params = {
+        "metrics": [{"key": "m1", "weight": 1.0}, {"key": "m2", "weight": 0.5}],
+        "rank_weights": [0.5, 0.3, 0.2],
+        "execution": {"mode": "hold"},
+    }
+    engine = RankedAllocationEngine()
+    m2 = {"AAA": 3.0, "BBB": 2.0, "CCC": 1.0}
+
+    # Baseline: BBB has data in m1 and ranks 2nd.
+    _patch_metrics(monkeypatch, {"m1": {"AAA": 3.0, "BBB": 2.0, "CCC": 1.0}, "m2": m2})
+    _, base = engine.compute_signal(_ohlcv(["AAA", "BBB", "CCC"]), params, {})
+    assert base["BBB"]["rank"] == 2
+    assert base["BBB"]["missing_metrics"] == []
+
+    # BBB without m1 -> last place in m1 -> drops below CCC.
+    _patch_metrics(monkeypatch, {"m1": {"AAA": 3.0, "BBB": None, "CCC": 1.0}, "m2": m2})
+    _, diag = engine.compute_signal(_ohlcv(["AAA", "BBB", "CCC"]), params, {})
+    assert diag["BBB"]["rank"] == 3
+    assert diag["BBB"]["percentiles"]["m1"] == 0.0
+    assert diag["BBB"]["missing_metrics"] == ["m1"]
+    assert diag["AAA"]["missing_metrics"] == []

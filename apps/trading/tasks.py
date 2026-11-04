@@ -18,6 +18,7 @@ from apps.trading.allocator import PortfolioAllocator
 from apps.trading.execution import OrderDispatcher
 from apps.trading.guards import skip_if_not_trading_day
 from apps.trading.universe import pipeline_universe
+from apps.trading.cash_sweep import order_intent_ids_sells_first
 from apps.trading.pipeline import (
     get_or_create_today_pipeline, pipeline_step, record_timing, step_lock, step_skip_reason, update_pipeline,
 )
@@ -26,6 +27,7 @@ from apps.accounting.services import portfolio_equity
 from apps.brokers.services import sync_alpaca_account
 from core.locks import redis_lock
 from core.market_time import get_ny_now
+from core.money import quantize_amount
 
 logger = logging.getLogger(__name__)
 
@@ -131,11 +133,13 @@ def prewarm_market_data():
 def get_frozen_ranking(version, as_of_date):
     """
     Devuelve el orden de ranking vigente (símbolos del puesto 1 al N) de un bot ranked_allocation,
-    o None si hoy toca recalcularlo: no hay ranking previo, es fecha de rebalanceo de algún
-    portafolio activo que usa el bot, o ese portafolio tiene un rebalanceo manual pendiente.
+    o None si hoy toca recalcularlo: no hay ranking previo, es fecha de rebalanceo DEL BOT
+    (su frecuencia en `version.params`, o la del portafolio si no la define; el ranking es una
+    propiedad del bot, no del portafolio) o algún portafolio que lo usa tiene un rebalanceo
+    manual pendiente.
     """
     from apps.strategies.models import AllocationSnapshot
-    from apps.trading.rebalance_policy import is_periodic_rebalance_date
+    from apps.trading.rebalance_policy import is_bot_rebalance_date
 
     last_snapshot = AllocationSnapshot.objects.filter(version=version).order_by("-as_of").first()
     if not last_snapshot:
@@ -145,7 +149,7 @@ def get_frozen_ranking(version, as_of_date):
         status="active", allocations__strategy=version.strategy, allocations__enabled=True,
     ).distinct()
     for p in portfolios:
-        if p.rebalance_pending or is_periodic_rebalance_date(p, as_of_date):
+        if p.rebalance_pending or is_bot_rebalance_date(version, p, as_of_date):
             return None
 
     ranked = sorted(
@@ -445,7 +449,8 @@ def dispatch_moc_and_manual_orders():
     dispatched_count = 0
 
     for run in active_runs:
-        for intent_id in list(run.intents.filter(status="pending").values_list("id", flat=True)):
+        # Ventas primero (las del cash sweep antes que las demas), luego las compras.
+        for intent_id in order_intent_ids_sells_first(run):
             if dispatch_pending_intent(dispatcher, intent_id):
                 dispatched_count += 1
         # No pisar estados terminales fijados durante el despacho (p. ej. missed_cutoff)
@@ -788,6 +793,15 @@ def reconcile_positions_vs_broker():
     return f"Checked {checked} broker accounts, {accounts_with_mismatch} with position mismatches"
 
 
+@shared_task(name="accrue_paper_dividends", queue="accounting")
+@skip_if_not_trading_day("accrue_paper_dividends")
+def accrue_paper_dividends_task():
+    """Acredita los dividendos de las posiciones de portafolios paper (antes del snapshot diario)."""
+    from apps.accounting.dividends import accrue_paper_dividends
+    result = accrue_paper_dividends()
+    return f"Accrued {result['created']} paper dividends ({result['errors']} errors)"
+
+
 @shared_task(name="accounting_daily_snapshot", queue="accounting")
 @skip_if_not_trading_day("accounting_daily_snapshot")
 def accounting_daily_snapshot():
@@ -821,8 +835,53 @@ def accounting_daily_snapshot():
             }
         )
         created += 1
+        record_sleeve_pnl(port, today, total_eq)
 
     return f"Created {created} daily equity snapshots"
+
+
+def record_sleeve_pnl(portfolio, as_of: date, equity: Decimal) -> int:
+    """
+    Llena SleevePnlDaily de cada manga: sleeve_value del dia y pnl = variacion de valor menos el
+    capital que entro/salio de la manga (reparto inicial, transferencias, aportes). Tambien deja el
+    residual contra el equity en el log (no se esconde).
+    """
+    from apps.accounting.models import SleevePnlDaily
+    from apps.accounting.sleeves import (
+        ensure_sleeve_accounts, sleeve_diagnostics, external_flows, sleeve_values,
+    )
+
+    ensure_sleeve_accounts(portfolio, equity=equity)
+    diag = sleeve_diagnostics(portfolio, equity)
+    sleeves = dict(diag["sleeves"])
+    # El cash sweep no tiene Allocation, pero su rendimiento tambien se atribuye dia a dia:
+    # pnl = variacion de valor de mercado - compras netas + dividendos netos.
+    sweep = Strategy.objects.filter(kind="cash_sweep").first()
+    if sweep:
+        sweep_info = sleeve_values(portfolio).get(sweep.id)
+        if sweep_info and (sweep_info["cash"] != 0 or sweep_info["positions_value"] != 0):
+            sleeves[sweep.id] = sweep_info
+    written = 0
+    for strategy_id, info in sleeves.items():
+        prev = SleevePnlDaily.objects.filter(
+            portfolio=portfolio, strategy_id=strategy_id, date__lt=as_of,
+        ).order_by("-date").first()
+        flows = external_flows(portfolio, strategy_id, prev.date if prev else None, as_of)
+        pnl = info["value"] - (prev.sleeve_value if prev else Decimal("0")) - flows
+        SleevePnlDaily.objects.update_or_create(
+            portfolio=portfolio, strategy_id=strategy_id, date=as_of,
+            defaults={
+                "sleeve_value": quantize_amount(info["value"]), "pnl": quantize_amount(pnl),
+                "positions_value": quantize_amount(info["positions_value"]),
+            },
+        )
+        written += 1
+    if diag["sleeves"]:
+        logger.info(
+            f"Sleeves {portfolio.name}: suma={diag['sleeves_total']:.2f} equity={equity:.2f} "
+            f"no asignada/residual={diag['unassigned']:.2f}"
+        )
+    return written
 
 
 
