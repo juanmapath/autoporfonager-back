@@ -142,6 +142,13 @@ class Portfolio(TimeStampedModel):
 
         effective_equity = max(total_equity, total_positions_val)
 
+        # With per-sleeve cash accounting a sleeve is worth its cash + positions (it floats with its own PnL).
+        from apps.accounting.sleeves import has_sleeve_accounts, sleeve_values as _sleeve_values
+        if has_sleeve_accounts(self):
+            accounted = _sleeve_values(self)
+            sleeve_values = {a.id: accounted.get(a.strategy_id, {}).get("value", Decimal("0.0")) for a in allocations}
+            effective_equity = total_equity
+
         for alloc in allocations:
             current_val = sleeve_values.get(alloc.id, Decimal("0.0"))
             current_weight = current_val / effective_equity if effective_equity > Decimal("0") else Decimal("0")
@@ -167,6 +174,7 @@ class Portfolio(TimeStampedModel):
                 "target_weight": float(target_weight),
                 "target_value": float(target_val),
                 "current_value": float(current_val),
+                "sleeve_value": float(current_val),
                 "current_weight": float(round(current_weight, 4)),
                 "absolute_drift": float(round(abs_drift, 4)),
                 "relative_drift": float(round(rel_drift, 4)),
