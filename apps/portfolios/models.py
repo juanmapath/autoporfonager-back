@@ -12,6 +12,7 @@ class RecommendedPortfolio(TimeStampedModel):
         ("weekly", "Weekly (Last business day)"),
         ("monthly", "Monthly (Last business day)"),
         ("quarterly", "Quarterly (Last business day)"),
+        ("quarterly_earnings", "Quarterly after earnings (Feb/May/Aug/Nov, last business day)"),
         ("never", "Never / Signal Trigger Only"),
     )
     TOLERANCE_MODE_CHOICES = (
@@ -60,6 +61,7 @@ class Portfolio(TimeStampedModel):
         ("weekly", "Weekly (Last business day)"),
         ("monthly", "Monthly (Last business day)"),
         ("quarterly", "Quarterly (Last business day)"),
+        ("quarterly_earnings", "Quarterly after earnings (Feb/May/Aug/Nov, last business day)"),
         ("never", "Never / Signal Trigger Only"),
     )
     TOLERANCE_MODE_CHOICES = (

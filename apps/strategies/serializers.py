@@ -58,6 +58,19 @@ class StrategySerializer(serializers.ModelSerializer):
         return signals
 
 
+REBALANCE_FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "quarterly_earnings", "never"]
+
+
+def _rebalance_params(validated_data) -> dict:
+    """Parametros de rebalanceo del bot; solo se guardan los definidos (el resto hereda del portafolio)."""
+    out = {}
+    for key in ("rebalance_frequency", "rebalance_tolerance", "rebalance_tolerance_mode"):
+        value = validated_data.get(key)
+        if value not in (None, "", "inherit"):
+            out[key] = value
+    return out
+
+
 class StrategyConfigItemSerializer(serializers.Serializer):
     strategy_name = serializers.CharField(max_length=64)
     params = serializers.ListField(child=serializers.FloatField(), required=False, default=list)
@@ -74,7 +87,14 @@ class BotCreateSerializer(serializers.Serializer):
     strategies = StrategyConfigItemSerializer(many=True, required=False, default=list)
     metrics = serializers.ListField(child=serializers.DictField(), required=False, default=list)
     rank_weights = serializers.ListField(child=serializers.FloatField(), required=False, default=list)
-    rebalance_frequency = serializers.CharField(max_length=32, required=False, default="monthly")
+    # Rebalanceo del bot (nivel 2). Sin valor (o "inherit") hereda el del portafolio.
+    rebalance_frequency = serializers.ChoiceField(
+        choices=REBALANCE_FREQUENCIES + ["inherit"], required=False, allow_null=True, default=None,
+    )
+    rebalance_tolerance = serializers.FloatField(required=False, allow_null=True, default=None, min_value=0)
+    rebalance_tolerance_mode = serializers.ChoiceField(
+        choices=["relative", "absolute", "inherit"], required=False, allow_null=True, default=None,
+    )
     execution = serializers.DictField(required=False, default=dict)
     leverage = serializers.FloatField(default=1.0)
     max_leverage = serializers.FloatField(default=1.0)
@@ -200,7 +220,7 @@ class BotCreateSerializer(serializers.Serializer):
             "strategies": validated_data.get("strategies", []),
             "metrics": validated_data.get("metrics", []),
             "rank_weights": validated_data.get("rank_weights", []),
-            "rebalance_frequency": validated_data.get("rebalance_frequency", "monthly"),
+            **_rebalance_params(validated_data),
             "execution": validated_data.get("execution", {"mode": "hold"}),
             "participates_in_rebalance": validated_data.get("participates_in_rebalance", True),
             "is_cash": validated_data.get("is_cash", False) or (validated_data.get("traded_symbol") or "").upper() in ("CASH", "USD"),
@@ -285,7 +305,7 @@ class BotCreateSerializer(serializers.Serializer):
             "strategies": validated_data.get("strategies", []),
             "metrics": validated_data.get("metrics", []),
             "rank_weights": validated_data.get("rank_weights", []),
-            "rebalance_frequency": validated_data.get("rebalance_frequency", "monthly"),
+            **_rebalance_params(validated_data),
             "execution": validated_data.get("execution", {"mode": "hold"}),
             "participates_in_rebalance": validated_data.get("participates_in_rebalance", True),
             "is_cash": validated_data.get("is_cash", False) or (validated_data.get("traded_symbol") or "").upper() in ("CASH", "USD"),

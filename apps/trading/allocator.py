@@ -8,7 +8,10 @@ from apps.trading.models import RebalanceRun, Target, OrderIntent
 from apps.accounting.models import LogicalPosition
 from apps.marketdata.models import LatestQuote
 from apps.strategies.models import Signal
-from apps.trading.rebalance_policy import is_periodic_rebalance_date, decide_position_trade
+from apps.trading.rebalance_policy import (
+    is_portfolio_rebalance_date, is_bot_rebalance_date, bot_rebalance_config,
+    needs_portfolio_reset, decide_position_trade,
+)
 from core.market_time import NY_TZ
 from core.money import quantize_qty
 
@@ -33,10 +36,12 @@ class PortfolioAllocator:
             equity = portfolio_equity(portfolio)["equity"]
 
         # Contabilidad por manga: portafolios existentes se inicializan en su primer run (equity x peso).
-        from apps.accounting.sleeves import ensure_sleeve_accounts
+        from apps.accounting.sleeves import (
+            ensure_sleeve_accounts, release_disabled_sleeves, sleeve_cash, sleeve_values, add_entry,
+        )
         ensure_sleeve_accounts(portfolio, equity=equity)
 
-        allocations = portfolio.allocations.filter(enabled=True).select_related("strategy", "broker_account")
+        allocations = list(portfolio.allocations.filter(enabled=True).select_related("strategy", "broker_account"))
         targets_created = []
 
         # Netting map: (broker_account_id, instrument_id) -> total_delta_qty
@@ -44,24 +49,71 @@ class PortfolioAllocator:
         intent_inst_map = {}
         processed_strategy_ids = set()
 
-        # Rebalance policy (portfolio-level): entries / exits trade every day; resizing an open
-        # position waits for a periodic rebalance date with drift above tolerance, unless the
-        # allocation weights changed since the previous run or a manual rebalance was requested.
-        is_rebalance_date = is_periodic_rebalance_date(portfolio, self.run.as_of.astimezone(NY_TZ).date())
+        # Two-level rebalance policy.
+        #  Level 1 (portfolio): each sleeve floats with its own PnL; on the portfolio rebalance date (and
+        #    band exceeded), on a weight change or a manual request ALL sleeves are reset to
+        #    equity x target_weight through cash transfers.
+        #  Level 2 (bot): entries / exits trade every day; resizing an open position waits for the BOT's
+        #    rebalance date with drift above the BOT's tolerance (inherited from the portfolio if unset).
+        run_date = self.run.as_of.astimezone(NY_TZ).date()
         force_rebalance = portfolio.rebalance_pending
         previous_run = (
             RebalanceRun.objects.filter(portfolio=portfolio, status__in=["executing", "done"])
             .exclude(id=self.run.id).order_by("-as_of").first()
         )
+        changed_ids = {
+            a.strategy_id for a in allocations
+            if previous_run is not None and a.updated_at > previous_run.as_of
+        }
+
+        release_disabled_sleeves(portfolio, reference=f"run:{self.run.id}")
+        cash_by_sleeve = sleeve_cash(portfolio)
+        values = {sid: v["value"] for sid, v in sleeve_values(portfolio).items()}
+        weights = {a.strategy_id: a.target_weight for a in allocations}
+        reset, reset_reason = needs_portfolio_reset(
+            portfolio, values, weights, equity,
+            is_rebalance_date=is_portfolio_rebalance_date(portfolio, run_date),
+            allocation_changed=bool(changed_ids),
+            force_rebalance=force_rebalance,
+            missing_sleeve=any(sid not in cash_by_sleeve for sid in weights),
+        )
+        reset_sleeves = set()
+        if reset:
+            for a in allocations:
+                transfer = equity * a.target_weight - values.get(a.strategy_id, Decimal("0"))
+                if abs(transfer) >= Decimal("0.01"):
+                    add_entry(portfolio, a.strategy_id, "transfer", transfer,
+                              reference=f"run:{self.run.id}:{reset_reason}")
+                    reset_sleeves.add(a.strategy_id)
+            values = {sid: v["value"] for sid, v in sleeve_values(portfolio).items()}
+
+        self.run.decisions = {
+            **(self.run.decisions or {}),
+            "portfolio_reset": reset_reason if reset else None,
+            "sleeves": {
+                str(a.strategy_id): {
+                    "value": float(values.get(a.strategy_id, Decimal("0"))),
+                    "weight_target": float(a.target_weight),
+                    "weight_actual": float(values.get(a.strategy_id, Decimal("0")) / equity) if equity > 0 else 0.0,
+                }
+                for a in allocations
+            },
+            "unassigned": float(equity - sum((values.get(a.strategy_id, Decimal("0")) for a in allocations), Decimal("0"))),
+        }
+        self.run.save(update_fields=["decisions"])
 
         for alloc in allocations:
             strategy = alloc.strategy
-            sleeve_capital = equity * alloc.target_weight
+            # The sleeve keeps its own PnL between portfolio rebalances (never negative for sizing).
+            sleeve_capital = max(values.get(strategy.id, Decimal("0")), Decimal("0"))
             version = alloc.version or strategy.versions.filter(status="live").first()
             if not version:
                 continue
             processed_strategy_ids.add(strategy.id)
-            allocation_changed = previous_run is not None and alloc.updated_at > previous_run.as_of
+            allocation_changed = strategy.id in changed_ids
+            bot_config = bot_rebalance_config(version, portfolio)
+            is_rebalance_date = is_bot_rebalance_date(version, portfolio, run_date)
+            sleeve_was_reset = strategy.id in reset_sleeves
 
             # Fetch latest signals for instruments in this version
             strat_instruments = version.instruments.filter(role="traded").select_related("instrument")
@@ -126,6 +178,8 @@ class PortfolioAllocator:
                         is_rebalance_date=is_rebalance_date,
                         allocation_changed=allocation_changed,
                         force_rebalance=force_rebalance,
+                        config=bot_config,
+                        portfolio_reset=sleeve_was_reset,
                     )
                 delta = (target_shares - curr_shares) if should_trade else Decimal("0.0")
 

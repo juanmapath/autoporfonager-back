@@ -54,7 +54,7 @@ def _allocate(portfolio, rebalance_date):
     run = RebalanceRun.objects.create(
         portfolio=portfolio, trigger="scheduled", as_of=timezone.now(), equity_base=portfolio.paper_initial_capital,
     )
-    with patch("apps.trading.allocator.is_periodic_rebalance_date", return_value=rebalance_date):
+    with patch("apps.trading.allocator.is_bot_rebalance_date", return_value=rebalance_date):
         intents = PortfolioAllocator(run).generate_targets_and_intents()
     return run.targets.get(), intents
 
@@ -81,7 +81,7 @@ def test_position_is_resized_on_rebalance_date_when_drift_exceeds_tolerance():
     _previous_run(portfolio)
 
     target, intents = _allocate(portfolio, rebalance_date=True)
-    assert target.reason == "periodic_monthly_drift_exceeded"
+    assert target.reason == "bot_rebalance"
     assert len(intents) == 1
     assert intents[0].net_delta_qty == target.target_qty - Decimal("10")
 

@@ -132,11 +132,13 @@ def prewarm_market_data():
 def get_frozen_ranking(version, as_of_date):
     """
     Devuelve el orden de ranking vigente (símbolos del puesto 1 al N) de un bot ranked_allocation,
-    o None si hoy toca recalcularlo: no hay ranking previo, es fecha de rebalanceo de algún
-    portafolio activo que usa el bot, o ese portafolio tiene un rebalanceo manual pendiente.
+    o None si hoy toca recalcularlo: no hay ranking previo, es fecha de rebalanceo DEL BOT
+    (su frecuencia en `version.params`, o la del portafolio si no la define; el ranking es una
+    propiedad del bot, no del portafolio) o algún portafolio que lo usa tiene un rebalanceo
+    manual pendiente.
     """
     from apps.strategies.models import AllocationSnapshot
-    from apps.trading.rebalance_policy import is_periodic_rebalance_date
+    from apps.trading.rebalance_policy import is_bot_rebalance_date
 
     last_snapshot = AllocationSnapshot.objects.filter(version=version).order_by("-as_of").first()
     if not last_snapshot:
@@ -146,7 +148,7 @@ def get_frozen_ranking(version, as_of_date):
         status="active", allocations__strategy=version.strategy, allocations__enabled=True,
     ).distinct()
     for p in portfolios:
-        if p.rebalance_pending or is_periodic_rebalance_date(p, as_of_date):
+        if p.rebalance_pending or is_bot_rebalance_date(version, p, as_of_date):
             return None
 
     ranked = sorted(
