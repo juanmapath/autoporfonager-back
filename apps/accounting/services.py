@@ -55,13 +55,24 @@ def get_current_prices(instruments: Iterable[Instrument], refresh: bool = True) 
     return prices
 
 
+DIVIDEND_TYPES = ("dividend", "dividend_withholding")
+
+
+def dividends_total(portfolio) -> Decimal:
+    """Dividendos recibidos menos retenciones (las retenciones se guardan con signo negativo)."""
+    return (
+        LedgerEntry.objects.filter(portfolio=portfolio, entry_type__in=DIVIDEND_TYPES)
+        .aggregate(t=Sum("amount"))["t"] or Decimal("0")
+    )
+
+
 def _book_equity(portfolio, unrealized_pnl: Decimal) -> Decimal:
-    """Equity contable: capital inicial + PnL realizado + PnL no realizado - comisiones."""
+    """Equity contable: capital inicial + PnL realizado + PnL no realizado + dividendos - comisiones."""
     from apps.trading.models import Fill
 
     realized = LogicalPosition.objects.filter(portfolio=portfolio).aggregate(t=Sum("realized_pnl"))["t"] or Decimal("0")
     fees = Fill.objects.filter(order__portfolio=portfolio).aggregate(t=Sum("commission"))["t"] or Decimal("0")
-    return portfolio.paper_initial_capital + realized + unrealized_pnl - fees
+    return portfolio.paper_initial_capital + realized + unrealized_pnl + dividends_total(portfolio) - fees
 
 
 def portfolio_equity(portfolio, unrealized_pnl: Optional[Decimal] = None, refresh: bool = False) -> dict:

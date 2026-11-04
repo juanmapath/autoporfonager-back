@@ -44,6 +44,8 @@ class LedgerEntry(ImmutableModel):
         ("realized_pnl", "Realized PnL"),
         ("fee", "Fee / Commission"),
         ("opening_balance", "Opening Balance"),
+        ("dividend", "Dividend"),
+        ("dividend_withholding", "Dividend withholding tax"),
     )
     portfolio = models.ForeignKey(Portfolio, on_delete=models.CASCADE, related_name="ledger_entries")
     broker_account = models.ForeignKey(BrokerAccount, on_delete=models.CASCADE, null=True, blank=True)

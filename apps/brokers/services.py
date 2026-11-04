@@ -4,7 +4,9 @@ from decimal import Decimal
 
 from apps.brokers.models import BrokerAccount
 from core.market_time import NY_TZ
-from apps.brokers.providers.alpaca import get_alpaca_cash_activities, test_alpaca_credentials
+from apps.brokers.providers.alpaca import (
+    get_alpaca_cash_activities, test_alpaca_credentials, DIVIDEND_ACTIVITY_TYPES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,9 +100,70 @@ def sync_alpaca_cash_flows(account: BrokerAccount) -> int:
     return created
 
 
+def sync_alpaca_dividends(account: BrokerAccount) -> int:
+    """
+    Importa al ledger los dividendos (DIV) y retenciones (DIVNRA) de Alpaca. Son rendimiento: no se
+    mezclan con los aportes de capital. Cada uno se atribuye a la(s) manga(s) que tienen el simbolo
+    (pro-rata a su cantidad). Idempotente por id de actividad. Devuelve los movimientos nuevos.
+    """
+    from apps.accounting.dividends import record_dividend
+    from apps.accounting.models import LedgerEntry, LogicalPosition
+
+    if account.provider != "alpaca" or not account.credential:
+        return 0
+
+    portfolio = account.portfolio
+    known_qs = LedgerEntry.objects.filter(
+        broker_account=account, entry_type__in=["dividend", "dividend_withholding"],
+    )
+    last = known_qs.exclude(effective_date=None).order_by("-effective_date").values_list("effective_date", flat=True).first()
+    linked_on = account.created_at.astimezone(NY_TZ).date()
+    after = (max(linked_on, last - timedelta(days=5)) if last else linked_on) - timedelta(days=1)
+
+    try:
+        activities = get_alpaca_cash_activities(*_alpaca_keys(account), after=after, activity_types=DIVIDEND_ACTIVITY_TYPES)
+    except Exception as e:
+        logger.error(f"No se pudieron leer los dividendos de {account.display_name}: {e}")
+        return 0
+
+    known = set(known_qs.values_list("reference", flat=True))
+    created = 0
+    for act in activities:
+        ref = f"alpaca:{act.get('id')}"
+        if ref in known or str(act.get("status", "")).lower() == "canceled":
+            continue
+        withholding = str(act.get("activity_type", "")).upper() == "DIVNRA"
+        raw = Decimal(str(act.get("net_amount") or "0"))
+        amount = -abs(raw) if withholding else abs(raw)
+        effective = date.fromisoformat(str(act.get("date"))[:10])
+        if amount == 0 or effective < linked_on:
+            continue
+
+        positions = list(LogicalPosition.objects.filter(
+            portfolio=portfolio, instrument__symbol=act.get("symbol"), qty__gt=0,
+        ))
+        total_qty = sum((p.qty for p in positions), Decimal("0"))
+        if not positions or total_qty <= 0:
+            # Sin manga duena visible: queda en el ledger (el equity del broker ya lo incluye).
+            if record_dividend(portfolio, None, amount, effective, ref, withholding, broker_account=account):
+                created += 1
+        else:
+            for i, pos in enumerate(positions):
+                share = amount * pos.qty / total_qty
+                part_ref = ref if i == 0 else f"{ref}#{pos.strategy_id}"
+                if record_dividend(portfolio, pos.strategy_id, share, effective, part_ref, withholding, broker_account=account) and i == 0:
+                    created += 1
+        known.add(ref)
+
+    if created:
+        logger.info(f"{created} dividendos importados para {account.display_name}")
+    return created
+
+
 def sync_alpaca_account(account: BrokerAccount) -> dict:
-    """Saldo + movimientos de capital. Devuelve el resultado del ping de saldo."""
+    """Saldo + movimientos de capital + dividendos. Devuelve el resultado del ping de saldo."""
     res = sync_alpaca_balance(account)
     if res.get("success"):
         res["new_cash_flows"] = sync_alpaca_cash_flows(account)
+        res["new_dividends"] = sync_alpaca_dividends(account)
     return res

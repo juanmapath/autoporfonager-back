@@ -791,6 +791,15 @@ def reconcile_positions_vs_broker():
     return f"Checked {checked} broker accounts, {accounts_with_mismatch} with position mismatches"
 
 
+@shared_task(name="accrue_paper_dividends", queue="accounting")
+@skip_if_not_trading_day("accrue_paper_dividends")
+def accrue_paper_dividends_task():
+    """Acredita los dividendos de las posiciones de portafolios paper (antes del snapshot diario)."""
+    from apps.accounting.dividends import accrue_paper_dividends
+    result = accrue_paper_dividends()
+    return f"Accrued {result['created']} paper dividends ({result['errors']} errors)"
+
+
 @shared_task(name="accounting_daily_snapshot", queue="accounting")
 @skip_if_not_trading_day("accounting_daily_snapshot")
 def accounting_daily_snapshot():
