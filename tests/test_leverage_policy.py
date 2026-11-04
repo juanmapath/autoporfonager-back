@@ -273,3 +273,75 @@ def test_save_snapshots_persists_the_day_label_once():
     snap = RegimeSnapshot.objects.get(provider="macro")
     assert snap.label == out["macro"] and "Z_Risk" in snap.features
     assert RegimeSnapshot.objects.count() == 1
+
+
+# ---------- H3: ranked_allocation usa la misma politica ----------
+
+def _ranked_df(n=400, drift=0.003, seed=1):
+    rng = np.random.default_rng(seed)
+    idx = pd.bdate_range("2020-01-01", periods=n)
+    close = 100 * np.exp(np.cumsum(rng.normal(drift, 0.004, n)))
+    return pd.DataFrame({"Close": close}, index=idx)
+
+
+def test_ranked_hold_mode_regime_pf_uses_daily_pf_in_current_regime_or_base():
+    from apps.strategies.engines.ranked_allocation import RankedAllocationEngine as E
+
+    df = _ranked_df()
+    pol = LeveragePolicy(type=POLICY_REGIME_PF, lookback_years=None)
+    series = {"macro": pd.Series(["R_1_0_0"] * len(df), index=df.index)}
+    lev, info = E._compute_policy_leverage(df, None, pol, 1.0, 2.0, series)
+    assert lev == 2.0 and info["mode"] == "hold_daily_pf" and info["regime"] == "R_1_0_0"
+    assert info["n_days_regime"] > 300 and info["pf_regime"] >= 1.35
+
+    # regimen vigente casi sin historia (< 60 dias) -> fixed/base
+    short = {"macro": pd.Series(["R_0_0_0"] * (len(df) - 20) + ["R_1_1_1"] * 20, index=df.index)}
+    lev, info = E._compute_policy_leverage(df, None, pol, 1.0, 2.0, short)
+    assert lev == 1.0 and info["source"] == "base_insufficient_history"
+
+    # sin etiquetas (proveedor sin datos) -> base
+    lev, info = E._compute_policy_leverage(df, None, pol, 1.0, 2.0, {})
+    assert lev == 1.0
+
+
+def test_ranked_strategy_mode_regime_pf_fixes_leverage_at_entry_of_open_trade():
+    from apps.strategies.engines.ranked_allocation import RankedAllocationEngine as E
+
+    df = _ranked_df(drift=0.004)
+    n = len(df)
+    sigs = pd.Series(0, index=df.index)
+    for k in range(10, 300, 20):  # trades de 10 velas, todos ganadores con esta deriva
+        sigs.iloc[k] = 1
+        sigs.iloc[k + 10] = -1
+    sigs.iloc[320] = 1  # trade abierto al final
+    pol = LeveragePolicy(type=POLICY_REGIME_PF, min_trades=5, shrinkage_k=2, lookback_years=None)
+
+    stable = {"macro": pd.Series(["R_A"] * n, index=df.index)}
+    changed = {"macro": pd.Series(["R_A"] * 350 + ["R_B"] * (n - 350), index=df.index)}  # cambia DURANTE el trade abierto
+    lev_a, info_a = E._compute_policy_leverage(df, sigs, pol, 1.0, 2.0, stable)
+    lev_b, info_b = E._compute_policy_leverage(df, sigs, pol, 1.0, 2.0, changed)
+    assert lev_a == lev_b == 2.0
+    assert info_b["providers"]["macro"]["regime"] == "R_A"  # el regimen de la ENTRADA, no el actual
+    assert info_a["mode"] == "strategy_trades" and info_a["n_trades_regime"] >= 5
+
+
+@pytest.mark.django_db
+def test_ranked_engine_without_policy_keeps_legacy_behaviour_and_reports_leverage_diagnostics():
+    from apps.strategies.engines.ranked_allocation import RankedAllocationEngine
+
+    from apps.instruments.models import Instrument
+    Instrument.objects.create(symbol="AAA", name="AAA", asset_class="equity")
+    df = _ranked_df()
+    params = {"metrics": [], "rank_weights": [1.0], "execution": {"mode": "hold"}, "leverage": 1.0, "max_leverage": 2.0}
+    legacy_fixed, diag = RankedAllocationEngine().compute_signal({"AAA": df}, dict(params), {})
+    assert diag["AAA"]["leverage"] == {"leverage_policy": "fixed"} and diag["AAA"]["applied_leverage"] == 1.0
+
+    legacy_dyn, diag = RankedAllocationEngine().compute_signal({"AAA": df}, {**params, "use_regimes": True}, {})
+    assert diag["AAA"]["leverage"]["leverage_policy"] == "global_pf"
+    assert diag["AAA"]["regime_state"] in ("bull_strong", "bull_moderate", "neutral_or_weak")
+
+    series = {"macro": pd.Series(["R_1_0_0"] * len(df), index=df.index)}
+    pol = {"leverage_policy": {"type": "regime_pf", "lookback_years": None}}
+    _, diag = RankedAllocationEngine().compute_signal({"AAA": df}, {**params, **pol, "_regime_series": series}, {})
+    assert diag["AAA"]["leverage"]["leverage_policy"] == "regime_pf" and diag["AAA"]["applied_leverage"] == 2.0
+    assert diag["AAA"]["regime_state"].startswith("regime_pf:")
