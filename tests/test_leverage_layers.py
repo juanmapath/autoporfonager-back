@@ -275,3 +275,39 @@ def test_single_signal_engine_with_layered_policy(monkeypatch):
     assert 1.0 <= d["applied_leverage"] <= 2.0 and "vol_target" in d["leverage"]["scalers"]
     assert targets["X"] == Decimal(str(round(d["applied_leverage"], 4)))
     assert isinstance(d["leverage_resized"], bool)
+
+
+# ---------- estudio ----------
+
+def test_leverage_study_on_synthetic_data_applies_the_acceptance_criterion():
+    from apps.strategies.leverage.report_html import render_report
+    from apps.strategies.leverage.study import LeverageStudy, StudyConfig
+
+    rng = np.random.default_rng(7)
+    n = 2600
+    idx = pd.bdate_range("2007-01-01", periods=n)
+    rets = rng.normal(0.0005, 0.011, n)
+    rets[300:340] = -0.02   # crisis en la primera mitad
+    rets[1900:1930] = -0.025  # crisis en la segunda mitad
+    closes = pd.Series(100 * np.exp(np.cumsum(rets)), index=idx)
+    state = np.ones(n, dtype=bool)  # siempre dentro: 1x replica exactamente al benchmark (sin slippage)
+    study = LeverageStudy.from_data(closes, state, 1.0, 2.0, start="2007-01-01", split="2012-01-01",
+                                    costs=SimCosts(slippage=0.0, margin_interest=False))
+    configs = [
+        StudyConfig("1x fijo", "referencia", {"type": "fixed"}, 1.0, 1.0),
+        StudyConfig("2x fijo", "referencia", {"type": "fixed"}, 2.0, 2.0),
+        StudyConfig("vol_target 0.10", "vol_target",
+                    {"type": "layered", "min": 0.5, "max": 2.0,
+                     "scalers": [{"key": "vol_target", "params": {"target_vol": 0.10}}]}, n_layers=1),
+    ]
+    out = study.run_grid(configs)
+    by = {r.config.name: r for r in out["results"]}
+    assert by["1x fijo"].acceptable_both                       # igual al benchmark
+    assert not by["2x fijo"].acceptable_both                   # cae el doble que el benchmark
+    assert by["2x fijo"].full["margin_calls"] == 1            # 2x con caidas del 55% -> llamada de margen
+    assert any("llamada" in x for x in by["2x fijo"].full["reasons"])
+    assert by["2x fijo"].full["crises"]                          # ventanas de crisis detectadas
+    assert out["selection"]["winner"] is not None and out["selection"]["winner"].acceptable_both
+    assert out["n_configs"] == 3 and out["n_runs"] >= 3
+    page = render_report(study, out, "Estudio sintetico")
+    assert "<svg" in page and "Recomendada" in page and "2x fijo" in page

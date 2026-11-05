@@ -174,6 +174,7 @@ def simulate(
     regime_labels: Optional[Mapping[str, Sequence]] = None,
     costs: Optional[SimCosts] = None,
     initial_cash: float = 1.0,
+    peak_reset_date=None,
 ) -> SimResult:
     costs = costs or SimCosts()
     index = pd.to_datetime(pd.Index(dates))
@@ -209,6 +210,8 @@ def simulate(
     last_info: Dict[str, Any] = {}
     last_resize = -1
     lev_sum, lev_days = 0.0, 0
+    # (estudio) el freno por caída mide la caída desde el inicio del periodo evaluado, no desde la historia previa
+    reset_idx = int(np.searchsorted(index.values, np.datetime64(pd.Timestamp(peak_reset_date)))) if peak_reset_date is not None else -1
 
     def regimes_at(i):
         return {p: aligned_label(regime_labels.get(p), i) for p in policy.providers}
@@ -254,6 +257,8 @@ def simulate(
             elif cash > 0 and costs.cash_yield:
                 cash += cash * max(0.0, rates[i - 1] - costs.margin_spread) / 252.0  # T-bill, sin spread
         equity = cash + shares * price
+        if i == reset_idx:
+            peak = equity
         peak = max(peak, equity)
 
         # 2. llamada de margen

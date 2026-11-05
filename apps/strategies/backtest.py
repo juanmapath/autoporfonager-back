@@ -158,6 +158,8 @@ class BacktestEngine:
         leverage_policy: Optional[Dict[str, Any]] = None,
         regime_series: Optional[Dict[str, pd.Series]] = None,
         layer_inputs=None,
+        signals_only: bool = False,
+        df_traded_override: Optional[pd.DataFrame] = None,
     ) -> Dict[str, Any]:
         """
         Ejecuta el backtest a partir de una configuración ad-hoc o personalizada.
@@ -173,8 +175,13 @@ class BacktestEngine:
             signal_sym = traded_sym
 
         # 1. Ingesta de datos
-        df_traded = fetch_historical_ohlcv(traded_sym, start_date, end_date)
-        df_signal = fetch_historical_ohlcv(signal_sym, start_date, end_date) if signal_sym != traded_sym else df_traded
+        if df_traded_override is not None:
+            # (leverage_study: historia propia, p. ej. con proxy ^NDX antes de 1999)
+            df_traded = df_traded_override
+            df_signal = fetch_historical_ohlcv(signal_sym, start_date, end_date) if signal_sym != traded_sym else df_traded
+        else:
+            df_traded = fetch_historical_ohlcv(traded_sym, start_date, end_date)
+            df_signal = fetch_historical_ohlcv(signal_sym, start_date, end_date) if signal_sym != traded_sym else df_traded
 
         # 2. Generación de Señales y Atribución por Sub-Estrategia
         signals_series = pd.Series(0, index=df_traded.index)
@@ -365,6 +372,11 @@ class BacktestEngine:
                     entry_meta_by_date[d_str] = [s_name]
                 elif sig.iloc[idx_i] == -1:
                     exit_meta_by_date[d_str] = [s_name]
+
+        if signals_only:
+            # (leverage_study) señales UNA vez; cada configuración solo cambia el apalancamiento
+            return {"df_traded": df_traded, "signals": pd.Series(signals_series, index=df_traded.index).fillna(0),
+                    "entry_meta": entry_meta_by_date, "exit_meta": exit_meta_by_date}
 
         # Recortar al rango solicitado (eliminando el padding previo de calentamiento)
         dt_start_pd = pd.to_datetime(start_date)
