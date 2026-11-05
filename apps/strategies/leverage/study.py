@@ -347,8 +347,12 @@ class LeverageStudy:
                 "robustness": robustness, "second_markets": second, "log": log}
 
     def robustness(self, r: ConfigResult) -> Dict[str, Any]:
-        """Cada parámetro numérico de las capas ×0.8 y ×1.2: frágil si el CAGR fuera de muestra cae > 2 pts
-        o deja de ser aceptable."""
+        """
+        Cada parámetro numérico de las capas ×0.8 y ×1.2. Frágil si alguna variante deja de ser aceptable o si
+        un parámetro es un PICO: el CAGR fuera de muestra cae > 2 pts en las DOS direcciones. (Un parámetro que es
+        un dial monótono -p. ej. la volatilidad objetivo- cambia el CAGR en un sentido por construcción; eso no
+        es un pico.)
+        """
         pol = r.config.policy
         variants = []
         if pol.get("type") == "layered":
@@ -373,15 +377,24 @@ class LeverageStudy:
                             newp[kind][idx] = item
                             variants.append((f"{layer['key']}.{pk}×{f}", newp))
         rows, fragile, reason = [], False, ""
+        drops_by_param: Dict[str, List[float]] = {}
         for label, newp in variants:
             vr = self.run_config(StudyConfig(r.config.name + " " + label, "robustez", newp, r.config.base,
                                              r.config.max, r.config.n_layers))
             drop = r.oos_score - vr.oos_score
-            ok = vr.acceptable_both and drop <= 0.02
+            param = label.rsplit("×", 1)[0]
+            drops_by_param.setdefault(param, []).append(drop)
             rows.append({"variant": label, "oos_cagr": vr.oos_score, "drop": drop, "acceptable": vr.acceptable_both,
-                         "ok": ok})
-            if not ok and not fragile:
-                fragile, reason = True, f"{label}: {'no aceptable' if not vr.acceptable_both else f'-{drop * 100:.1f} pts'}"
+                         "ok": vr.acceptable_both})
+            if not vr.acceptable_both and not fragile:
+                fragile, reason = True, f"{label}: deja de ser aceptable"
+        for param, drops in drops_by_param.items():
+            if len(drops) == 2 and min(drops) > 0.02:
+                for row in rows:
+                    if row["variant"].startswith(param + "×"):
+                        row["ok"] = False
+                if not fragile:
+                    fragile, reason = True, f"{param}: pico (cae > 2 pts en ambas direcciones)"
         return {"rows": rows, "fragile": fragile, "reason": reason}
 
     def second_markets(self, r: ConfigResult, symbols=("SPY", "IWM")) -> List[Dict[str, Any]]:
@@ -395,10 +408,17 @@ class LeverageStudy:
                                       initial_cash=self.initial_cash, history_start=self.history_start,
                                       traded_symbol=sym)
                 res = other.run_config(r.config)
-                self.n_runs += 1
+                base_1x = other.run_config(StudyConfig("1x fijo", "referencia", {"type": "fixed"}, 1.0, 1.0))
+                self.n_runs += 2
+                ok = res.full["acceptable"]
+                note = ""
+                if not ok and not base_1x.full["acceptable"]:
+                    # La estrategia ya excede el límite a 1x en este mercado: no es un efecto del apalancamiento
+                    ok, note = True, "la estrategia a 1x ya excede el límite en este mercado (no evaluable)"
                 out.append({"symbol": sym, "cagr": res.full["cagr"], "max_dd": res.full["max_dd"],
-                            "bench_dd": res.full["bench"]["max_dd"], "ok": res.full["acceptable"],
-                            "reasons": res.full["reasons"]})
+                            "bench_dd": res.full["bench"]["max_dd"], "ok": ok,
+                            "reasons": res.full["reasons"] + ([note] if note else []),
+                            "one_x_dd": base_1x.full["max_dd"]})
             except Exception as e:  # sin datos del segundo mercado
                 logger.warning(f"Segundo mercado {sym}: {e}")
                 out.append({"symbol": sym, "ok": True, "error": str(e)})

@@ -311,3 +311,13 @@ def test_leverage_study_on_synthetic_data_applies_the_acceptance_criterion():
     assert out["n_configs"] == 3 and out["n_runs"] >= 3
     page = render_report(study, out, "Estudio sintetico")
     assert "<svg" in page and "Recomendada" in page and "2x fijo" in page
+
+
+def test_leverage_catalog_lists_policies_layers_and_providers():
+    from apps.strategies.leverage.catalog import leverage_catalog
+
+    cat = leverage_catalog()
+    assert [p["key"] for p in cat["policies"]] == ["fixed", "global_pf", "regime_pf", "layered"]
+    kinds = {l["key"]: l["kind"] for l in cat["layers"]}
+    assert kinds["vol_target"] == "scaler" and kinds["trend_gate"] == "cap" and kinds["macro_pf"] == "label"
+    assert {p["key"]: p["available"] for p in cat["providers"]}["macro"] is True

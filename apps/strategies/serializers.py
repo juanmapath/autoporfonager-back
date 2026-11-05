@@ -47,7 +47,7 @@ class StrategySerializer(serializers.ModelSerializer):
         if not v:
             return None
         policy = resolve_leverage_policy(v.params)
-        if policy.type != POLICY_REGIME_PF:
+        if not policy.uses_regimes:
             return None
         out = {}
         for key in policy.providers:

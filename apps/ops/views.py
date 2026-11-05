@@ -54,12 +54,14 @@ class OpsStrategiesView(APIView):
     def get(self, request):
         from apps.strategies.signals.metadata import BOT_CATALOG
         from apps.strategies.catalog_settings import strategies_catalog_with_availability
+        from apps.strategies.leverage.catalog import leverage_catalog
         from apps.fundamentals.metrics import get_metrics_catalog
         strategies = Strategy.objects.exclude(kind="cash_sweep").prefetch_related("versions")
         return Response({
             "strategies": StrategySerializer(strategies, many=True).data,
             "bot_types": BOT_CATALOG,
             "strategies_catalog": strategies_catalog_with_availability(),
+            "leverage_catalog": leverage_catalog(),
             "metrics_catalog": get_metrics_catalog(),
         })
 
