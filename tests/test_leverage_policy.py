@@ -36,7 +36,7 @@ def test_policy_resolution():
     # use_regimes=true es regime_pf (ya no existe el PF global)
     assert resolve_leverage_policy({"use_regimes": True}).type == POLICY_REGIME_PF
     p = resolve_leverage_policy({"leverage_policy": {"type": "regime_pf"}})
-    assert p.providers == ("macro",) and p.min_trades == 8 and p.lookback_years == 15 and p.combine == "min"
+    assert p.providers == ("macro",) and p.min_trades == 3 and p.lookback_years == 15 and p.combine == "min"
     for bad in ({"type": "global_pf"}, {"type": "nope"}, {"type": "regime_pf", "combine": "max"}):
         with pytest.raises(ValueError):
             resolve_leverage_policy({"leverage_policy": bad})
