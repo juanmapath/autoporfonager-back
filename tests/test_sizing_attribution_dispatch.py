@@ -17,7 +17,7 @@ from apps.strategies.backtest import BacktestEngine
 from apps.strategies.engines.multi_signal import MultiSignalEngine
 from apps.strategies.engines.single_signal import SingleSignalEngine
 from apps.strategies.models import Strategy, StrategyVersion, StrategyInstrument, Signal
-from apps.strategies.signals.sizing import current_trade_leverage, pulses_to_long_state
+from apps.strategies.signals.sizing import LeveragePolicy, POLICY_REGIME_PF, current_trade_leverage, pulses_to_long_state
 from apps.trading.allocator import PortfolioAllocator
 from apps.trading.execution import OrderDispatcher
 from apps.trading.models import RebalanceRun, Order, FillAllocation
@@ -182,14 +182,20 @@ def test_live_leverage_matches_backtest_open_trade():
     df = _ohlcv(_CLOSES)
     state = pulses_to_long_state(pd.Series(_PULSES, index=df.index))
 
+    # Mismo regimen en todas las velas: los 3 trades cerrados (todos ganadores) cuentan para el regimen actual
+    policy = LeveragePolicy(type=POLICY_REGIME_PF, min_trades=2, lookback_years=None)
+    labels = {"macro": ["R_A"] * len(df)}
+
     res = BacktestEngine(initial_cash=2000.0)._simulate(
         df=df, signals=state.astype(int), symbol="QQQ",
-        base_leverage=1.0, max_leverage=1.7, use_dynamic_leverage=True,
+        base_leverage=1.0, max_leverage=1.7, leverage_policy=policy, regime_labels=labels,
     )
     open_trade = res["trades"][-1]
     assert open_trade.get("open") is True
 
-    live = current_trade_leverage(df["Close"].values, state.values, 1.0, 1.7, True)
+    live = current_trade_leverage(
+        df["Close"].values, state.values, 1.0, 1.7, policy=policy, dates=df.index, regime_labels=labels,
+    )
     assert round(live, 2) == open_trade["leverage"]
     assert live == pytest.approx(1.7)  # sin pérdidas => PF 99 => apalancamiento máximo
 
@@ -199,14 +205,23 @@ def test_multi_signal_engine_applies_leverage_from_params():
     params = {
         "strategies": [{"strategy_name": "fake", "params": []}],
         "leverage": 1.0, "max_leverage": 1.7, "use_regimes": True,
+        "leverage_policy": {"type": "regime_pf", "min_trades": 2, "lookback_years": None},
+        "_regime_series": {"macro": pd.Series("R_A", index=df.index)},
     }
     with patch.dict("apps.strategies.engines.multi_signal.STRATEGY_MAP", {"fake": _fake_strategy}):
         targets, diag = MultiSignalEngine().compute_signal({"QQQ": df}, params, {"QQQ": Decimal("1.0")})
         assert targets["QQQ"] == Decimal("1.7")
         assert diag["QQQ"]["applied_leverage"] == 1.7
+        assert diag["QQQ"]["leverage"]["providers"]["macro"]["regime"] == "R_A"
+
+        # Con regimenes activos pero sin datos de regimen (proveedor sin historial) se aplica el apalancamiento base
+        no_data = {k: v for k, v in params.items() if k != "_regime_series"}
+        targets, diag = MultiSignalEngine().compute_signal({"QQQ": df}, no_data, {"QQQ": Decimal("1.0")})
+        assert targets["QQQ"] == Decimal("1.0")
+        assert diag["QQQ"]["leverage"]["providers"]["macro"]["source"] == "base_no_regime"
 
         # Sin apalancamiento dinámico se mantiene el apalancamiento base
-        params["use_regimes"] = False
+        params = {**params, "use_regimes": False, "leverage_policy": None}
         targets, _ = MultiSignalEngine().compute_signal({"QQQ": df}, params, {"QQQ": Decimal("1.0")})
         assert targets["QQQ"] == Decimal("1.0")
 

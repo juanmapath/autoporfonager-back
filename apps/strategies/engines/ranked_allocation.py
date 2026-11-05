@@ -19,6 +19,16 @@ from apps.strategies.signals.catalog import STRATEGY_MAP
 from apps.instruments.models import Instrument
 from apps.fundamentals.models import FundamentalStatement
 from apps.fundamentals.metrics import METRIC_REGISTRY, MetricContext
+from apps.strategies.regimes.service import align_labels
+from apps.strategies.signals.sizing import (
+    ClosedTrade, LeveragePolicy, aligned_label, leverage_from_pf, policy_entry_leverage, resolve_leverage_policy,
+)
+
+# Modo hold con regime_pf: PF diario de ganancia/dolor por regimen (umbrales y minimos propios, en dias)
+HOLD_MIN_DAYS = 60
+HOLD_PF_MAX = 1.35
+HOLD_PF_MID = 1.10
+HOLD_PF_CAP = 5.0
 
 
 class RankedAllocationEngine(BaseEngine):
@@ -52,7 +62,9 @@ class RankedAllocationEngine(BaseEngine):
         # Leverage & Regime parameters
         base_leverage = float(params.get("leverage", 1.0))
         max_leverage = float(params.get("max_leverage", base_leverage))
-        use_regimes = bool(params.get("use_regimes", False))
+        # Politica de apalancamiento: fixed, o regime_pf (use_regimes=true o leverage_policy.type="regime_pf")
+        policy = resolve_leverage_policy(params)
+        regime_series = (params.get("_regime_series") or {}) if policy.uses_regimes else {}
 
         symbols = list(ohlcv_data.keys())
         n_assets = len(symbols)
@@ -198,13 +210,13 @@ class RankedAllocationEngine(BaseEngine):
                 else:
                     sub_signal = 0
 
-            applied_lev, regime_pf, regime_state = self._compute_asset_regime_leverage(
-                df=df,
-                sigs=sigs,
-                base_leverage=base_leverage,
-                max_leverage=max_leverage,
-                use_regimes=use_regimes,
-            )
+            lev_info: Dict[str, Any] = {"leverage_policy": policy.type, "applied_leverage": base_leverage}
+            applied_lev = base_leverage
+            if policy.uses_regimes:
+                applied_lev, lev_info = self._compute_policy_leverage(
+                    df=df, sigs=sigs if exec_mode == "strategy" else None, policy=policy,
+                    base_leverage=base_leverage, max_leverage=max_leverage, regime_series=regime_series,
+                )
 
             lev_dec = Decimal("1") if abs(applied_lev - 1.0) < 1e-9 else Decimal(str(round(applied_lev, 4)))
 
@@ -227,8 +239,7 @@ class RankedAllocationEngine(BaseEngine):
                 "composite_score": round(composite_scores.get(sym, 0.0), 4),
                 "assigned_weight": str(cap_weight),
                 "applied_leverage": round(applied_lev, 4),
-                "regime_profit_factor": regime_pf,
-                "regime_state": regime_state,
+                "leverage": lev_info,
                 "target_exposure": str(exposure),
                 "execution_mode": exec_mode,
                 "sub_strategy_signal": sub_signal,
@@ -303,77 +314,80 @@ class RankedAllocationEngine(BaseEngine):
         return 1 if int(sigs.iloc[-1]) > 0 else 0
 
     @staticmethod
-    def _compute_asset_regime_leverage(
+    def _compute_policy_leverage(
         df: Optional[pd.DataFrame],
         sigs: Optional[pd.Series],
+        policy: LeveragePolicy,
         base_leverage: float,
         max_leverage: float,
-        use_regimes: bool,
-    ) -> Tuple[float, Optional[float], str]:
+        regime_series: Dict[str, pd.Series],
+    ) -> Tuple[float, Dict[str, Any]]:
         """
-        Computes individual per-asset dynamic leverage based on historical regime.
-        - In 'strategy' mode (when `sigs` is provided and has >= 2 closed trades),
-          uses Walk-Forward Profit Factor of the strategy on that specific asset.
-        - In 'hold' mode (or fallback when < 2 strategy trades exist),
-          uses the asset's 60-bar Gain-to-Pain ratio (daily Profit Factor) and SMA trend filter.
+        Apalancamiento por la politica regime_pf (misma `policy_entry_leverage` que el resto de motores).
+        - Modo 'strategy' (hay `sigs`): trades de la sub-estrategia en este activo; si hay un trade
+          abierto el apalancamiento queda fijado en su ENTRADA (trades cerrados y regimen de ese dia).
+        - Modo 'hold' (sin trades): PF diario de ganancia/dolor del activo en los dias del regimen
+          vigente (retorno del dia t etiquetado con el regimen del cierre t-1);
+          base si no hay `HOLD_MIN_DAYS` dias de historia en ese regimen.
         """
-        if not use_regimes or df is None or df.empty or "Close" not in df.columns:
-            return base_leverage, None, "fixed"
-
         eff_max = max(base_leverage, max_leverage)
+        if df is None or df.empty or "Close" not in df.columns:
+            return base_leverage, {"leverage_policy": policy.type, "source": "no_data", "applied_leverage": base_leverage}
 
-        # 1. Try strategy-specific Walk-Forward Profit Factor on this asset
+        index = pd.to_datetime(pd.Index(df.index))
+        labels = {p: align_labels(regime_series.get(p), index) for p in policy.providers}
+        closes = df["Close"].astype(float).values
+
         if sigs is not None and not sigs.empty and len(sigs) == len(df):
-            in_pos = False
-            entry_price = 0.0
-            trade_returns: List[float] = []
-            for s_val, c_val in zip(sigs.values, df["Close"].values):
+            closed: List[ClosedTrade] = []
+            in_pos, entry_idx = False, 0
+            for i, (s_val, c_val) in enumerate(zip(sigs.values, closes)):
                 if s_val == 1 and not in_pos:
-                    in_pos = True
-                    entry_price = float(c_val)
+                    in_pos, entry_idx = True, i
                 elif s_val == -1 and in_pos:
                     in_pos = False
-                    if entry_price > 0:
-                        trade_returns.append((float(c_val) - entry_price) / entry_price)
+                    if closes[entry_idx] > 0:
+                        closed.append(ClosedTrade(
+                            index[entry_idx], index[i], (c_val - closes[entry_idx]) / closes[entry_idx],
+                            {p: aligned_label(labels[p], entry_idx) for p in policy.providers},
+                        ))
+            if in_pos:
+                at, as_of = entry_idx, index[entry_idx]
+            else:
+                at, as_of = len(index) - 1, index[-1] + pd.Timedelta(days=1)
+            now = {p: aligned_label(labels[p], at) for p in policy.providers}
+            lev, info = policy_entry_leverage(policy, closed, base_leverage, eff_max, as_of, now)
+            first = next(iter(info.get("providers", {}).values()), {})
+            return lev, {**info, "mode": "strategy_trades", "source": first.get("source")}
 
-            if len(trade_returns) >= 2:
-                gains = sum(r for r in trade_returns if r > 0)
-                losses = abs(sum(r for r in trade_returns if r < 0))
-                pf = (gains / losses) if losses > 0 else (5.0 if gains > 0 else 1.0)
-                if pf >= 2.5:
-                    return eff_max, round(pf, 4), "bull_strong"
-                elif pf >= 1.5:
-                    mid_lev = base_leverage + 0.5 * (eff_max - base_leverage)
-                    return mid_lev, round(pf, 4), "bull_moderate"
-                else:
-                    return base_leverage, round(pf, 4), "neutral_or_weak"
-
-        # 2. Asset price regime (used in 'hold' mode or fallback when < 2 strategy trades)
-        closes = df["Close"].dropna()
-        if len(closes) < 10:
-            return base_leverage, None, "insufficient_data"
-
-        window_closes = closes.iloc[-60:] if len(closes) >= 60 else closes
-        rets = window_closes.pct_change().dropna()
-        if rets.empty:
-            return base_leverage, None, "insufficient_data"
-
-        pos_sum = float(rets[rets > 0].sum())
-        neg_sum = float(abs(rets[rets < 0].sum()))
-        if neg_sum > 0:
-            asset_pf = pos_sum / neg_sum
+        # Modo hold: PF diario condicionado al regimen
+        rets = pd.Series(closes).pct_change().values
+        provider = policy.providers[0]
+        lag = [None] + [aligned_label(labels[provider], i) for i in range(len(index) - 1)]  # regimen del cierre t-1
+        today = aligned_label(labels[provider], len(index) - 1)
+        if policy.lookback_years:
+            cutoff = index[-1] - pd.Timedelta(days=int(policy.lookback_years * 365.25))
         else:
-            asset_pf = 3.0 if pos_sum > 0 else 1.0
+            cutoff = index[0]
+        valid = [(r_, l_) for r_, l_, d_ in zip(rets, lag, index) if d_ >= cutoff and l_ is not None and np.isfinite(r_)]
+        in_regime = [r_ for r_, l_ in valid if l_ == today]
 
-        sma_ref = float(window_closes.mean())
-        last_close = float(window_closes.iloc[-1])
-        in_uptrend = last_close >= sma_ref
+        def daily_pf(values):
+            pos = sum(v for v in values if v > 0)
+            neg = abs(sum(v for v in values if v < 0))
+            return pos / neg if neg > 0 else (HOLD_PF_CAP if pos > 0 else 1.0)
 
-        if in_uptrend and asset_pf >= 1.35:
-            return eff_max, round(asset_pf, 4), "bull_strong"
-        elif in_uptrend and asset_pf >= 1.10:
-            mid_lev = base_leverage + 0.5 * (eff_max - base_leverage)
-            return mid_lev, round(asset_pf, 4), "bull_moderate"
-        else:
-            return base_leverage, round(asset_pf, 4), "neutral_or_weak"
-
+        info = {
+            "leverage_policy": policy.type, "mode": "hold_daily_pf", "regime": today,
+            "n_trades_regime": len(in_regime), "pf_regime": None, "source": "base_insufficient_trades",
+        }
+        if today is None:
+            info.update(source="base_no_regime", applied_leverage=base_leverage)
+            return base_leverage, info
+        if len(in_regime) < HOLD_MIN_DAYS:
+            info["applied_leverage"] = base_leverage
+            return base_leverage, info
+        pf_r = min(daily_pf(in_regime), HOLD_PF_CAP)
+        lev = leverage_from_pf(pf_r, base_leverage, eff_max, HOLD_PF_MAX, HOLD_PF_MID)
+        info.update(pf_regime=pf_r, source="regime_pf", applied_leverage=lev)
+        return lev, info

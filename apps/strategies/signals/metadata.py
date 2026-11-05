@@ -23,7 +23,7 @@ BOT_CATALOG = {
         "id": "multi_strategy",
         "name": "Multi Strategy Bot",
         "category": "Multi Signal",
-        "description": "Combina múltiples estrategias sobre un mismo activo. Suma y escala la posición si varias estrategias coinciden.",
+        "description": "Combina múltiples estrategias sobre un mismo activo con OR: estás dentro mientras alguna esté activa. La exposición no depende de cuántas señales coinciden; el apalancamiento lo decide la política de apalancamiento (fijo, PF global o PF por régimen).",
         "engine": "multi_signal",
         "min_strategies": 2,
         "max_strategies": 10,
