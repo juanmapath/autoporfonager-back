@@ -2,8 +2,8 @@
 Lógica compartida entre el backtest y los motores en vivo para que ambos
 dimensionen las posiciones exactamente igual:
   - conversión de pulsos discretos (1 / -1 / 0) a estado continuo de posición
-  - apalancamiento walk-forward según una política (`leverage_policy`): fijo, Profit Factor
-    global acumulado (comportamiento histórico) o Profit Factor condicionado al régimen
+  - apalancamiento walk-forward según una política (`leverage_policy`): fijo, o Profit Factor
+    de los trades que entraron en el mismo régimen de mercado que hoy (`regime_pf`)
 """
 import math
 from dataclasses import dataclass, field
@@ -15,7 +15,6 @@ DEFAULT_SLIPPAGE_PCT = 0.0005
 
 PF_MAX_LEVERAGE_THRESHOLD = 2.5
 PF_MID_LEVERAGE_THRESHOLD = 1.5
-MIN_TRADES_FOR_DYNAMIC_LEVERAGE = 2
 
 
 def pulses_to_long_state(signals: pd.Series) -> pd.Series:
@@ -63,40 +62,20 @@ def leverage_from_pf(
     return base_leverage
 
 
-def dynamic_leverage_from_pnls(
-    closed_pnls: Sequence[float],
-    base_leverage: float,
-    max_leverage: float,
-    use_dynamic_leverage: bool,
-    max_threshold: float = PF_MAX_LEVERAGE_THRESHOLD,
-    mid_threshold: float = PF_MID_LEVERAGE_THRESHOLD,
-    min_trades: int = MIN_TRADES_FOR_DYNAMIC_LEVERAGE,
-) -> float:
-    """Apalancamiento a aplicar en una nueva entrada según el Profit Factor de los trades ya cerrados."""
-    active_leverage = base_leverage
-    if use_dynamic_leverage and len(closed_pnls) >= min_trades:
-        running_pf = profit_factor(closed_pnls)
-        active_leverage = leverage_from_pf(running_pf, base_leverage, max_leverage, max_threshold, mid_threshold)
-
-    return max(1.0, float(active_leverage))
-
-
 # ---------------------------------------------------------------------------------------------
 # Política de apalancamiento (`StrategyVersion.params["leverage_policy"]`)
+#   fixed     -> siempre el apalancamiento base
+#   regime_pf -> según el PF de los trades cerrados que entraron en el régimen de mercado de hoy
+# Sin `leverage_policy`: use_regimes=true -> regime_pf; use_regimes=false -> fixed.
 # ---------------------------------------------------------------------------------------------
 
 POLICY_FIXED = "fixed"
-POLICY_GLOBAL_PF = "global_pf"
 POLICY_REGIME_PF = "regime_pf"
-POLICY_TYPES = (POLICY_FIXED, POLICY_GLOBAL_PF, POLICY_REGIME_PF)
+POLICY_TYPES = (POLICY_FIXED, POLICY_REGIME_PF)
 COMBINE_MODES = ("min", "mean")
 
 DEFAULT_MIN_TRADES = 8
-DEFAULT_SHRINKAGE_K = 10.0
 DEFAULT_LOOKBACK_YEARS = 15.0
-# El PF "infinito" (sin pérdidas, 99) se acota antes de encoger para que unos pocos trades
-# ganadores no den un PF encogido desorbitado.
-PF_SHRINK_CAP = 10.0
 
 
 @dataclass(frozen=True)
@@ -105,9 +84,7 @@ class LeveragePolicy:
     providers: Tuple[str, ...] = ("macro",)
     combine: str = "min"
     min_trades: int = DEFAULT_MIN_TRADES
-    shrinkage_k: float = DEFAULT_SHRINKAGE_K
     lookback_years: Optional[float] = DEFAULT_LOOKBACK_YEARS
-    half_life_years: Optional[float] = None
     max_threshold: float = PF_MAX_LEVERAGE_THRESHOLD
     mid_threshold: float = PF_MID_LEVERAGE_THRESHOLD
     provider_params: Mapping[str, Any] = field(default_factory=dict)
@@ -121,8 +98,7 @@ class LeveragePolicy:
         if self.type == POLICY_REGIME_PF:
             d.update({
                 "providers": list(self.providers), "combine": self.combine, "min_trades": self.min_trades,
-                "shrinkage_k": self.shrinkage_k, "lookback_years": self.lookback_years,
-                "half_life_years": self.half_life_years,
+                "lookback_years": self.lookback_years,
                 "thresholds": {"max": self.max_threshold, "mid": self.mid_threshold},
                 "provider_params": dict(self.provider_params),
             })
@@ -130,14 +106,11 @@ class LeveragePolicy:
 
 
 def resolve_leverage_policy(params: Optional[Mapping[str, Any]]) -> LeveragePolicy:
-    """
-    Política efectiva de una versión. Sin `leverage_policy`: `use_regimes=true` -> global_pf
-    (idéntico al comportamiento histórico) y `use_regimes=false` -> fixed.
-    """
+    """Política efectiva de una versión (ver cabecera de sección)."""
     params = params or {}
     raw = params.get("leverage_policy")
     if not isinstance(raw, Mapping) or not raw.get("type"):
-        return LeveragePolicy(type=POLICY_GLOBAL_PF if params.get("use_regimes") else POLICY_FIXED)
+        return LeveragePolicy(type=POLICY_REGIME_PF if params.get("use_regimes") else POLICY_FIXED)
 
     ptype = str(raw["type"])
     if ptype not in POLICY_TYPES:
@@ -148,15 +121,12 @@ def resolve_leverage_policy(params: Optional[Mapping[str, Any]]) -> LeveragePoli
         raise ValueError(f"leverage_policy.combine invalido: {combine!r}. Opciones: {', '.join(COMBINE_MODES)}.")
     providers = raw.get("providers") or ["macro"]
     lookback = raw.get("lookback_years", DEFAULT_LOOKBACK_YEARS)
-    half_life = raw.get("half_life_years")
     return LeveragePolicy(
         type=ptype,
         providers=tuple(str(p) for p in providers),
         combine=combine,
         min_trades=int(raw.get("min_trades", DEFAULT_MIN_TRADES)),
-        shrinkage_k=float(raw.get("shrinkage_k", DEFAULT_SHRINKAGE_K)),
         lookback_years=float(lookback) if lookback else None,
-        half_life_years=float(half_life) if half_life else None,
         max_threshold=float(th.get("max", PF_MAX_LEVERAGE_THRESHOLD)),
         mid_threshold=float(th.get("mid", PF_MID_LEVERAGE_THRESHOLD)),
         provider_params=dict(raw.get("provider_params") or {}),
@@ -184,37 +154,25 @@ def regime_pf_estimate(
     as_of,
 ) -> Dict[str, Any]:
     """
-    PF global, PF del régimen `label` y PF encogido con los trades cerrados antes de `as_of` y dentro
-    de la ventana. Devuelve `pf_used` (None si no hay historia suficiente) y `source`.
+    PF de los trades cerrados ANTES de `as_of` (dentro de la ventana) que entraron en el régimen `label`.
+    `source`: "regime_pf" (hay al menos `min_trades` en el régimen), "base_insufficient_trades"
+    (menos trades que el mínimo en este régimen) o "base_no_regime" (hoy no hay etiqueta de régimen).
+    Solo en el primer caso `pf_used` es un PF; en los otros el apalancamiento es el base.
     """
     eligible = [t for t in trades if pd.Timestamp(t.exit_date) < pd.Timestamp(as_of)]
     if policy.lookback_years:
         eligible = [t for t in eligible if _age_years(t.exit_date, as_of) <= policy.lookback_years]
-
-    def weights(ts):
-        if not policy.half_life_years:
-            return None
-        return [0.5 ** (_age_years(t.exit_date, as_of) / policy.half_life_years) for t in ts]
-
-    pf_global = profit_factor([t.pnl for t in eligible], weights(eligible)) if eligible else None
     in_regime = [t for t in eligible if label is not None and t.regimes.get(provider) == label]
     n = len(in_regime)
-    pf_reg = profit_factor([t.pnl for t in in_regime], weights(in_regime)) if in_regime else None
+    pf_reg = profit_factor([t.pnl for t in in_regime]) if in_regime else None
 
-    info: Dict[str, Any] = {
-        "regime": label, "pf_regime": pf_reg, "n_trades_regime": n,
-        "pf_global": pf_global, "n_trades_global": len(eligible), "pf_shrunk": None,
-        "pf_used": None, "source": "base_insufficient_history",
-    }
-    if len(eligible) < policy.min_trades:
-        return info
-    if n < policy.min_trades:
-        info.update(pf_used=pf_global, source="pf_global")
-        return info
-    k = policy.shrinkage_k
-    pg, pr = min(pf_global, PF_SHRINK_CAP), min(pf_reg, PF_SHRINK_CAP)
-    shrunk = (n * pr + k * pg) / (n + k)
-    info.update(pf_shrunk=shrunk, pf_used=shrunk, source="pf_shrunk")
+    info: Dict[str, Any] = {"regime": label, "n_trades_regime": n, "pf_regime": pf_reg, "pf_used": None}
+    if label is None:
+        info["source"] = "base_no_regime"
+    elif n < policy.min_trades:
+        info["source"] = "base_insufficient_trades"
+    else:
+        info.update(pf_used=pf_reg, source="regime_pf")
     return info
 
 
@@ -236,14 +194,6 @@ def policy_entry_leverage(
     if policy.type == POLICY_FIXED:
         diag["applied_leverage"] = max(1.0, float(base_leverage))
         return diag["applied_leverage"], diag
-
-    if policy.type == POLICY_GLOBAL_PF:
-        pnls = [t.pnl for t in closed_trades]
-        lev = dynamic_leverage_from_pnls(
-            pnls, base_leverage, max_leverage, True, policy.max_threshold, policy.mid_threshold,
-        )
-        diag.update({"applied_leverage": lev, "pf_global": profit_factor(pnls) if pnls else None})
-        return lev, diag
 
     current_regimes = current_regimes or {}
     suggestions: List[float] = []
@@ -351,10 +301,10 @@ def current_trade_leverage(
     apalancamiento fijado en la entrada del trade actualmente abierto. El valor se decide
     al entrar y no cambia mientras el trade siga abierto, igual que en el backtest.
     Si no hay posición abierta devuelve el apalancamiento que aplicaría la próxima entrada.
-    Sin `policy` se usa la legada (`use_dynamic_leverage` -> global_pf, si no fixed).
+    Sin `policy` se usa la legada (`use_dynamic_leverage` -> regime_pf, si no fixed).
     """
     if policy is None:
-        policy = LeveragePolicy(type=POLICY_GLOBAL_PF if use_dynamic_leverage else POLICY_FIXED)
+        policy = LeveragePolicy(type=POLICY_REGIME_PF if use_dynamic_leverage else POLICY_FIXED)
     lev, info = simulate_trade_leverages(
         closes, long_state, policy, base_leverage, max_leverage, dates, regime_labels, slippage_pct
     )

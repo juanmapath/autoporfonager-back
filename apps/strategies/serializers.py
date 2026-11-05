@@ -98,7 +98,7 @@ def validate_leverage_policy(value):
 
 
 def _leverage_policy_params(validated_data) -> dict:
-    """`leverage_policy` solo se guarda si se definio (sin ella: use_regimes -> global_pf, si no fixed)."""
+    """`leverage_policy` solo se guarda si se definio (sin ella: use_regimes -> regime_pf, si no fixed)."""
     value = validated_data.get("leverage_policy")
     return {"leverage_policy": value} if value else {}
 

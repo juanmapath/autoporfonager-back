@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from apps.strategies.signals.catalog import STRATEGY_MAP
 from apps.strategies.signals.sizing import (
-    ClosedTrade, LeveragePolicy, POLICY_FIXED, POLICY_GLOBAL_PF, aligned_label, policy_entry_leverage,
+    ClosedTrade, LeveragePolicy, POLICY_FIXED, POLICY_REGIME_PF, aligned_label, policy_entry_leverage,
     resolve_leverage_policy,
 )
 
@@ -115,7 +115,7 @@ class BacktestEngine:
         strat_base_lev = float(leverage if leverage is not None else params.get("leverage", 1.0))
         strat_max_lev = float(max_leverage if max_leverage is not None else params.get("max_leverage", strat_base_lev))
         strat_dyn = use_dynamic_leverage if use_dynamic_leverage is not None else params.get("use_regimes", False)
-        # Politica: la explicita gana; si se fuerza use_dynamic_leverage se usa la legada (fixed/global_pf);
+        # Politica: la explicita gana; si se fuerza use_dynamic_leverage se usa la legada (fixed/regime_pf);
         # si no, la de la version (`leverage_policy`, o la derivada de `use_regimes`).
         if leverage_policy is None and use_dynamic_leverage is None:
             leverage_policy = params.get("leverage_policy")
@@ -383,7 +383,7 @@ class BacktestEngine:
         if leverage_policy:
             policy = resolve_leverage_policy({"leverage_policy": leverage_policy})
         else:
-            policy = LeveragePolicy(type=POLICY_GLOBAL_PF if use_dynamic_leverage else POLICY_FIXED)
+            policy = LeveragePolicy(type=POLICY_REGIME_PF if use_dynamic_leverage else POLICY_FIXED)
         regime_labels = None
         if policy.uses_regimes:
             from apps.strategies.regimes.service import align_labels, fetch_series_backtest
@@ -632,7 +632,7 @@ class BacktestEngine:
         regime_labels: Optional[Dict[str, List[Optional[str]]]] = None,
     ) -> Dict[str, Any]:
         if leverage_policy is None:
-            leverage_policy = LeveragePolicy(type=POLICY_GLOBAL_PF if use_dynamic_leverage else POLICY_FIXED)
+            leverage_policy = LeveragePolicy(type=POLICY_REGIME_PF if use_dynamic_leverage else POLICY_FIXED)
         regime_labels = regime_labels or {}
         closes = df["Close"].values
         dates = df.index
@@ -668,7 +668,7 @@ class BacktestEngine:
 
             # Buy Signal (1)
             if sig == 1 and not in_position:
-                # 1. Determinar el apalancamiento segun la politica (fixed / global_pf / regime_pf), walk-forward
+                # 1. Determinar el apalancamiento segun la politica (fixed / regime_pf), walk-forward
                 # (funcion compartida con los motores en vivo: apps/strategies/signals/sizing.py)
                 regimes_now = {p: aligned_label(regime_labels.get(p), i) for p in leverage_policy.providers}
                 active_leverage, lev_info = policy_entry_leverage(

@@ -11,9 +11,9 @@ from apps.strategies.signals.sizing import (
     ClosedTrade, LeveragePolicy, POLICY_REGIME_PF, policy_entry_leverage, profit_factor, resolve_leverage_policy,
 )
 
-COMPARISON = ("fixed_base", "fixed_max", "global_pf", "regime_pf")
+COMPARISON = ("fixed_base", "fixed_max", "regime_pf")
 LABELS = {
-    "fixed_base": "Fijo (base)", "fixed_max": "Fijo (max)", "global_pf": "PF global", "regime_pf": "PF por regimen",
+    "fixed_base": "Fijo (base)", "fixed_max": "Fijo (max)", "regime_pf": "PF por regimen",
 }
 
 
@@ -74,7 +74,6 @@ def build_regime_report(
     plans = {
         "fixed_base": (base, base, {"type": "fixed"}),
         "fixed_max": (max_lev, max_lev, {"type": "fixed"}),
-        "global_pf": (base, max_lev, {"type": "global_pf"}),
         "regime_pf": (base, max_lev, policy.to_dict()),
     }
     for name, (lev, mx, pol) in plans.items():
@@ -104,7 +103,6 @@ def build_regime_report(
             "trades": len(in_r),
             "profit_factor": round(profit_factor([c.pnl for c, _ in in_r]), 2) if in_r else None,
             "avg_return_pct": round(sum(t["pnl_pct"] for _, t in in_r) / len(in_r), 2) if in_r else None,
-            "pf_shrunk": round(pinfo["pf_shrunk"], 2) if pinfo["pf_shrunk"] is not None else None,
             "leverage": round(lev, 2),
             "source": pinfo["source"],
             "avg_duration_market_days": round(d.get("avg_market_days", 0.0), 1),
@@ -125,14 +123,14 @@ def format_report(report: Dict[str, Any]) -> str:
         f"=== {report['bot']} (version {report['version_id']}) | proveedor {report['provider']} | "
         f"{report['period'][0]} -> {report['period'][1]} | lev base {report['base_leverage']} / max {report['max_leverage']}",
         "",
-        f"{'Regimen':<10}{'Trades':>7}{'PF':>7}{'Ret.medio%':>12}{'PF*':>7}{'Apalanc.':>10}{'Dur.mkt(d)':>12}"
+        f"{'Regimen':<10}{'Trades':>7}{'PF':>7}{'Ret.medio%':>12}{'Apalanc.':>10}{'Dur.mkt(d)':>12}"
         f"{'Dur.cal(d)':>12}{'%tiempo':>9}  Fuente",
     ]
     for r in report["regimes"]:
         f = lambda v, nd=2: "-" if v is None else f"{v:.{nd}f}"
         lines.append(
             f"{r['regime']:<10}{r['trades']:>7}{f(r['profit_factor']):>7}{f(r['avg_return_pct']):>12}"
-            f"{f(r['pf_shrunk']):>7}{r['leverage']:>10.2f}{r['avg_duration_market_days']:>12.1f}"
+            f"{r['leverage']:>10.2f}{r['avg_duration_market_days']:>12.1f}"
             f"{r['avg_duration_calendar_days']:>12.1f}{r['pct_of_time']:>9.1f}  {r['source']}"
         )
     lines += ["", f"{'Politica':<18}{'CAGR%':>8}{'MaxDD%':>9}{'Sharpe':>8}{'Trades':>8}{'Lev.medio':>11}"]
