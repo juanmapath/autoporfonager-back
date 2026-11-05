@@ -317,7 +317,7 @@ def test_leverage_catalog_lists_policies_layers_and_providers():
     from apps.strategies.leverage.catalog import leverage_catalog
 
     cat = leverage_catalog()
-    assert [p["key"] for p in cat["policies"]] == ["fixed", "global_pf", "regime_pf", "layered"]
+    assert [p["key"] for p in cat["policies"]] == ["fixed", "regime_pf", "layered"]
     kinds = {l["key"]: l["kind"] for l in cat["layers"]}
     assert kinds["vol_target"] == "scaler" and kinds["trend_gate"] == "cap" and kinds["macro_pf"] == "label"
     assert {p["key"]: p["available"] for p in cat["providers"]}["macro"] is True

@@ -10,7 +10,7 @@ from apps.strategies.regimes.report import build_regime_report, format_report
 class Command(BaseCommand):
     help = (
         "Informe de regimenes de una version: por regimen, trades, PF, retorno medio, apalancamiento resultante y "
-        "duracion media; y backtests con politica fija (base), fija (max), PF global y PF por regimen."
+        "duracion media; y backtests con politica fija (base), fija (max) y PF por regimen."
     )
 
     def create_parser(self, prog_name, subcommand, **kwargs):

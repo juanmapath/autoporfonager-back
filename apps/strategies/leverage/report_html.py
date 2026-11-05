@@ -69,7 +69,7 @@ def render_report(study, out: Dict[str, Any], title: str) -> str:
     sel = out["selection"]
     winner = sel.get("winner")
     bench = study.bench
-    rows = sorted(results, key=lambda r: (not r.acceptable_both, -r.oos_score))
+    rows = sorted(results, key=lambda r: (not r.acceptable_both, -r.score, -r.oos_calmar))
 
     def crisis_cells(r):
         cells = []
@@ -95,9 +95,11 @@ def render_report(study, out: Dict[str, Any], title: str) -> str:
             f"<tr{win}><td>{html.escape(r.config.name)}<br><small>{html.escape(r.config.group)}"
             f"{' · ' + html.escape(r.config.note) if r.config.note else ''}</small></td>"
             f"<td class=\"{'ok' if r.acceptable_both else 'bad'}\">{verdict}</td>"
-            f"<td><b>{_pct(r.oos_score)}</b></td><td>{_pct(f['cagr'])}</td><td>{_pct(a['cagr'])}</td><td>{_pct(b['cagr'])}</td>"
-            f"<td>{_pct(f['max_dd'])}</td>{crisis_cells(r)}"
-            f"<td>{_num(f['calmar'])}</td><td>{_recovery(f['recovery_days'])}</td><td>{_num(f['sharpe'])}</td>"
+            f"<td><b>{_num(r.score) if r.acceptable_both else '–'}</b></td>"
+            f"<td><b>{_num(r.oos_calmar)}</b></td><td><b>{_pct(r.oos_cagr)}</b></td>"
+            f"<td>{_pct(f['cagr'])}</td><td>{_pct(a['cagr'])}</td><td>{_pct(b['cagr'])}</td>"
+            f"<td>{_pct(f['max_dd'])}</td><td>{_num(f['calmar'])}</td><td>{_num(f['sortino'])}</td>"
+            f"<td>{_num(f['sharpe'])}</td>{crisis_cells(r)}<td>{_recovery(f['recovery_days'])}</td>"
             f"<td>{_num(st['avg_leverage'])}x</td><td>{st['pct_days_over_1x']:.0f}%</td>"
             f"<td>{_num(st['turnover_per_year'], 1)}</td><td>{st['interest_paid_pct']:.1f}%</td>"
             f"<td>{st['margin_calls']}</td><td><small>{html.escape(reasons)}</small></td></tr>"
@@ -122,9 +124,9 @@ def render_report(study, out: Dict[str, Any], title: str) -> str:
         f"<td class=\"{'ok' if x['ok'] else 'bad'}\">{'ok' if x['ok'] else 'falla'}</td></tr>"
         for x in rob.get("rows", []))
     sm_rows = "".join(
-        f"<tr><td>{x['symbol']}</td><td>{_pct(x.get('cagr'))}</td><td>{_pct(x.get('max_dd'))}</td>"
-        f"<td>{_pct(x.get('bench_dd'))}</td><td class=\"{'ok' if x['ok'] else 'bad'}\">"
-        f"{'ok' if x['ok'] else 'viola'}</td><td><small>{html.escape('; '.join(x.get('reasons', [])) or x.get('error', ''))}</small></td></tr>"
+        f"<tr><td>{x['symbol']}</td><td>{_pct(x.get('cagr'))}</td><td>{_pct(x.get('bench_cagr'))}</td>"
+        f"<td>{_pct(x.get('max_dd'))}</td><td>{_pct(x.get('bench_dd'))}</td><td>{_num(x.get('calmar'))}</td>"
+        f"<td class=\"{'ok' if x['ok'] else 'bad'}\">{'ok' if x['ok'] else 'no cumple'}</td><td><small>{html.escape('; '.join(x.get('reasons', [])) or x.get('error', ''))}</small></td></tr>"
         for x in (sel.get("second_markets") or []))
     proxy = (f"<p class=\"note\">Historia extendida: antes de {study.proxy_until.date()} se usan los retornos de "
              f"{html.escape(', '.join(study.proxy.values()))} como proxy de {study.symbol}.</p>") if study.proxy_until else ""
@@ -150,14 +152,24 @@ td.ok{{color:var(--ok);background:var(--okbg)}} td.bad{{color:var(--bad);backgro
 <h2>Recomendación</h2><div class="rec">{rec}</div>
 <h2>Gráficos</h2>{charts}
 <h2>Todas las configuraciones</h2>
-<p class="note">Criterio (§1): aceptable si la caída máxima y la caída en cada crisis no superan las del benchmark ({study.symbol} 1x) y no hay llamadas de margen, en el periodo completo y en cada mitad. CAGR fuera de muestra = promedio del CAGR de cada mitad (cada una valida la selección hecha en la otra). Ordenadas: aceptables primero, por CAGR fuera de muestra.</p>
-<div class="wrap"><table><thead><tr><th>Configuración</th><th>Veredicto</th><th>CAGR fuera de muestra</th><th>CAGR total</th><th>CAGR 1ª mitad</th><th>CAGR 2ª mitad</th><th>Caída máx.<br><small>bench {_pct(_bench_maxdd(study))}</small></th>{crisis_head}<th>Calmar</th><th>Recuperación</th><th>Sharpe</th><th>Apalanc. medio</th><th>% días &gt;1x</th><th>Rotación/año</th><th>Interés margen</th><th>Llamadas margen</th><th>Motivo</th></tr></thead>
+<p class="note">Rechazo: CAGR menor que el del benchmark ({study.symbol} 1x, CAGR {_pct(_bench_cagr(study))}) en el periodo completo o en alguna mitad, o llamadas de margen. Ranking de las aceptables: puntaje = {study.calmar_weight:.0%} × percentil del Calmar fuera de muestra + {1 - study.calmar_weight:.0%} × percentil del CAGR fuera de muestra (fuera de muestra = promedio de las dos mitades, cada una valida la selección hecha en la otra). Las caídas por crisis (verde = cae menos que el benchmark), Sortino y Sharpe son informativos.</p>
+<div class="wrap"><table><thead><tr><th>Configuración</th><th>Veredicto</th><th>Puntaje</th><th>Calmar fuera de muestra</th><th>CAGR fuera de muestra</th><th>CAGR total</th><th>CAGR 1ª mitad</th><th>CAGR 2ª mitad</th><th>Caída máx.<br><small>bench {_pct(_bench_maxdd(study))}</small></th><th>Calmar total<br><small>bench {_num(_bench_calmar(study))}</small></th><th>Sortino</th><th>Sharpe</th>{crisis_head}<th>Recuperación</th><th>Apalanc. medio</th><th>% días &gt;1x</th><th>Rotación/año</th><th>Interés margen</th><th>Llamadas margen</th><th>Motivo</th></tr></thead>
 <tbody>{''.join(body)}</tbody></table></div>
 <h2>Robustez del ganador (±20% por parámetro)</h2>
 <div class="wrap"><table><thead><tr><th>Variante</th><th>CAGR fuera de muestra</th><th>Cambio</th><th>Resultado</th></tr></thead><tbody>{rob_rows or '<tr><td colspan=4>Sin parámetros numéricos</td></tr>'}</tbody></table></div>
 <h2>Segundo mercado</h2>
-<div class="wrap"><table><thead><tr><th>Mercado</th><th>CAGR</th><th>Caída máx.</th><th>Caída benchmark</th><th>Límite de caída</th><th>Detalle</th></tr></thead><tbody>{sm_rows}</tbody></table></div>
+<div class="wrap"><table><thead><tr><th>Mercado</th><th>CAGR</th><th>CAGR benchmark</th><th>Caída máx.</th><th>Caída benchmark</th><th>Calmar</th><th>Criterio</th><th>Detalle</th></tr></thead><tbody>{sm_rows}</tbody></table></div>
 </body></html>"""
+
+
+def _bench_cagr(study):
+    from apps.strategies.leverage.metrics import cagr
+    return cagr(study.bench)
+
+
+def _bench_calmar(study):
+    dd = _bench_maxdd(study)
+    return _bench_cagr(study) / abs(dd) if dd < 0 else None
 
 
 def _bench_maxdd(study):
@@ -185,22 +197,26 @@ def _recommendation(study, out) -> str:
     pa, pb = sel.get("pick_a"), sel.get("pick_b")
     wf = ""
     if pa:
-        wf += (f"<li>Elegida en {study.start.year}–{study.split.year - 1}: <b>{html.escape(pa.config.name)}</b> "
-               f"(CAGR {_pct(pa.half_a['cagr'])}); validación {study.split.year}–: CAGR {_pct(pa.half_b['cagr'])}, "
+        wf += (f"<li>Mejor puntaje en {study.start.year}–{study.split.year - 1}: <b>{html.escape(pa.config.name)}</b> "
+               f"(Calmar {_num(pa.half_a['calmar'])}, CAGR {_pct(pa.half_a['cagr'])}); en la validación "
+               f"{study.split.year}–: Calmar {_num(pa.half_b['calmar'])}, CAGR {_pct(pa.half_b['cagr'])}, "
                f"{'aceptable' if pa.half_b['acceptable'] else 'NO aceptable'}.</li>")
     if pb:
-        wf += (f"<li>Elegida en {study.split.year}–: <b>{html.escape(pb.config.name)}</b> (CAGR {_pct(pb.half_b['cagr'])}); "
-               f"validación {study.start.year}–{study.split.year - 1}: CAGR {_pct(pb.half_a['cagr'])}, "
+        wf += (f"<li>Mejor puntaje en {study.split.year}–: <b>{html.escape(pb.config.name)}</b> "
+               f"(Calmar {_num(pb.half_b['calmar'])}, CAGR {_pct(pb.half_b['cagr'])}); en la validación "
+               f"{study.start.year}–{study.split.year - 1}: Calmar {_num(pb.half_a['calmar'])}, CAGR {_pct(pb.half_a['cagr'])}, "
                f"{'aceptable' if pb.half_a['acceptable'] else 'NO aceptable'}.</li>")
     if w is None:
         return f"<p><b>Ninguna configuración cumple el criterio en ambas mitades.</b></p><ul>{wf}{log}</ul>"
-    ref = next((r for r in out["results"] if r.config.name.startswith("global_pf")), None)
+    ref = next((r for r in out["results"] if r.config.name.startswith("regime_pf")), None)
     vs = ""
-    if ref is not None:
-        vs = (f" Frente a la política actual (global_pf): CAGR fuera de muestra {_pct(ref.oos_score)}, caída máx. "
-              f"{_pct(ref.full['max_dd'])}, {'aceptable' if ref.acceptable_both else 'no aceptable'}.")
-    return (f"<p><b>Recomendada: {html.escape(w.config.name)}</b> — CAGR fuera de muestra {_pct(w.oos_score)} "
-            f"(total {_pct(w.full['cagr'])}), caída máx. {_pct(w.full['max_dd'])} vs benchmark "
-            f"{_pct(w.full['bench']['max_dd'])}, apalancamiento medio {w.stats['avg_leverage']:.2f}x, "
+    if ref is not None and ref is not w:
+        vs = (f" Frente a la política actual (regime_pf macro): Calmar fuera de muestra {_num(ref.oos_calmar)}, "
+              f"CAGR {_pct(ref.oos_cagr)}, caída máx. {_pct(ref.full['max_dd'])}, "
+              f"{'aceptable' if ref.acceptable_both else 'no aceptable'}.")
+    return (f"<p><b>Recomendada: {html.escape(w.config.name)}</b> — Calmar fuera de muestra {_num(w.oos_calmar)}, "
+            f"CAGR fuera de muestra {_pct(w.oos_cagr)} (total {_pct(w.full['cagr'])} vs benchmark "
+            f"{_pct(w.full['bench']['cagr'])}), caída máx. {_pct(w.full['max_dd'])} vs {_pct(w.full['bench']['max_dd'])}, "
+            f"Sortino {_num(w.full['sortino'])}, apalancamiento medio {w.stats['avg_leverage']:.2f}x, "
             f"{w.config.n_layers} capa(s).{vs}</p><ul>{wf}{log}</ul>"
             f"<p class=\"note\">El estudio recomienda; aplicar la configuración es decisión del operador.</p>")

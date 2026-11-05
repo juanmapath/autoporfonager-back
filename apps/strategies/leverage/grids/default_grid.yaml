@@ -5,8 +5,7 @@
 # base 1x no cambiarian nada (serian 1x fijo). Con escaladores o etiquetas la base es la de la version.
 - {name: "1x fijo", group: referencia, base: 1.0, max: 1.0, policy: {type: fixed}}
 - {name: "max fijo", group: referencia, base: max, policy: {type: fixed}}
-- {name: "global_pf (actual)", group: referencia, policy: {type: global_pf}}
-- {name: "regime_pf macro (04d)", group: referencia, policy: {type: regime_pf}}
+- {name: "regime_pf macro (actual)", group: referencia, policy: {type: regime_pf}}
 
 - {name: "vol_target 0.18", group: vol_target, policy: {type: layered, scalers: [{key: vol_target, params: {target_vol: 0.18}}]}}
 - {name: "vol_target 0.22", group: vol_target, policy: {type: layered, scalers: [{key: vol_target, params: {target_vol: 0.22}}]}}

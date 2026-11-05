@@ -1,7 +1,7 @@
 """
 Simulador de apalancamiento unificado (04e §2 y §6): una sola función para la política `layered`
 en vivo y en backtest (paridad) y para el estudio `leverage_study`, que también corre aquí las
-referencias fixed / global_pf / regime_pf con los mismos costes.
+referencias fixed / regime_pf con los mismos costes.
 
 Por día t (precio de cierre p_t):
   1. Interés de margen sobre la caja negativa del día anterior (tasa ^IRX + spread) y, opcional,
@@ -197,7 +197,7 @@ def simulate(
     cash, shares = float(initial_cash), 0.0
     equity_arr, lev_arr, applied_arr = np.zeros(n), np.zeros(n), np.zeros(n)
     trades: List[Dict[str, Any]] = []
-    closed_pnl: List[ClosedTrade] = []       # PnL en $ (global_pf / regime_pf)
+    closed_pnl: List[ClosedTrade] = []       # PnL en $ (regime_pf)
     closed_ret: List[ClosedTrade] = []       # retornos sin apalancar (políticas de etiqueta de layered)
     margin_calls: List[str] = []
     interest_paid, turnover, resizes = 0.0, 0.0, 0

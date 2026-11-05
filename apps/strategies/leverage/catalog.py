@@ -5,10 +5,7 @@ from apps.strategies.regimes import REGIME_PROVIDERS
 POLICIES = [
     {"key": "fixed", "name": "Fijo", "needs_regimes": False,
      "description": "Siempre el apalancamiento base."},
-    {"key": "global_pf", "name": "PF global",
-     "description": "Profit Factor de todos los trades cerrados (comportamiento histórico): PF >= 2.5 máximo, "
-                    ">= 1.5 punto medio, si no base. Se fija en la entrada.", "needs_regimes": False},
-    {"key": "regime_pf", "name": "PF por régimen",
+    {"key": "regime_pf", "name": "PF por régimen", "default": True,
      "description": "Profit Factor de los trades pasados que entraron en el mismo régimen de mercado que hoy. "
                     "Con menos de min_trades en el régimen, base. Se fija en la entrada.", "needs_regimes": True,
      "defaults": {"min_trades": 3, "lookback_years": 15}},

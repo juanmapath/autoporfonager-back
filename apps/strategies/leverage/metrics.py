@@ -33,6 +33,13 @@ def sharpe(equity: pd.Series) -> float:
     return float(r.mean() / sd * np.sqrt(252)) if sd and sd > 0 else 0.0
 
 
+def sortino(equity: pd.Series) -> float:
+    r = equity.pct_change().dropna()
+    downside = r[r < 0]
+    dd = float(np.sqrt(np.mean(downside ** 2))) if len(downside) else 0.0
+    return float(r.mean() / dd * np.sqrt(252)) if dd > 0 else 0.0
+
+
 def recovery_days(equity: pd.Series) -> Optional[int]:
     """Días calendario de la recuperación más larga (de un máximo hasta volver a superarlo); None si no se recupera."""
     if equity is None or len(equity) < 2:
@@ -62,5 +69,6 @@ def window_drawdown(equity: pd.Series, start, end) -> Optional[float]:
 def summary(equity: pd.Series) -> Dict[str, float]:
     dd = max_drawdown(equity)
     g = cagr(equity)
-    return {"cagr": g, "max_dd": dd, "sharpe": sharpe(equity), "calmar": (g / abs(dd)) if dd < 0 else None,
+    return {"cagr": g, "max_dd": dd, "sharpe": sharpe(equity), "sortino": sortino(equity),
+            "calmar": (g / abs(dd)) if dd < 0 else None,
             "recovery_days": recovery_days(equity)}

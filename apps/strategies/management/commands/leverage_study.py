@@ -48,6 +48,7 @@ class Command(BaseCommand):
         parser.add_argument("--margin-spread", type=float, default=0.02)
         parser.add_argument("--maintenance", type=float, default=0.30)
         parser.add_argument("--cash-yield", action="store_true")
+        parser.add_argument("--calmar-weight", type=float, default=0.6, help="peso del Calmar en el ranking (0..1)")
         parser.add_argument("--report", default=None, help="ruta del HTML")
         parser.add_argument("--json", default=None, help="ruta de un JSON con la tabla")
 
@@ -69,7 +70,7 @@ class Command(BaseCommand):
             proxy[k.strip().upper()] = v.strip()
         costs = SimCosts(margin_spread=o["margin_spread"], maintenance=o["maintenance"], cash_yield=o["cash_yield"])
         study = LeverageStudy(version, start=o["start"], end=o["end"], split=o["split"], proxy=proxy, costs=costs,
-                              history_start=o["history_start"])
+                              history_start=o["history_start"], calmar_weight=o["calmar_weight"])
         configs = load_configs(o["configs"], study.max)
         out = study.run_grid(configs)
         title = f"Estudio de apalancamiento · {version.strategy.name} (v{version.version})"
@@ -77,9 +78,11 @@ class Command(BaseCommand):
             Path(o["report"]).write_text(render_report(study, out, title), encoding="utf-8")
             self.stdout.write(f"Reporte: {o['report']}")
         rows = []
-        for r in sorted(out["results"], key=lambda r: (not r.acceptable_both, -r.oos_score)):
+        for r in sorted(out["results"], key=lambda r: (not r.acceptable_both, -r.score, -r.oos_calmar)):
             rows.append({
-                "name": r.config.name, "acceptable": r.acceptable_both, "oos_cagr": r.oos_score,
+                "name": r.config.name, "acceptable": r.acceptable_both, "score": r.score,
+                "oos_calmar": r.oos_calmar, "oos_cagr": r.oos_cagr, "calmar": r.full["calmar"],
+                "sortino": r.full["sortino"], "bench_cagr": r.full["bench"]["cagr"],
                 "cagr": r.full["cagr"], "max_dd": r.full["max_dd"], "bench_dd": r.full["bench"]["max_dd"],
                 "cagr_a": r.half_a["cagr"], "cagr_b": r.half_b["cagr"], "sharpe": r.full["sharpe"],
                 "avg_leverage": r.stats["avg_leverage"], "margin_calls": r.stats["margin_calls"],
@@ -90,11 +93,14 @@ class Command(BaseCommand):
                                                    if out["selection"]["winner"] else None,
                                                    "log": out["selection"]["log"]}, indent=2, default=str),
                                        encoding="utf-8")
-        self.stdout.write(f"{'Configuracion':<52}{'Acept.':>7}{'CAGR OOS':>10}{'CAGR':>8}{'MaxDD':>8}{'Bench':>8}{'Lev':>6}")
+        self.stdout.write(f"{'Configuracion':<52}{'Acept.':>7}{'Punt.':>7}{'Calmar OOS':>11}{'CAGR OOS':>10}"
+                          f"{'CAGR':>8}{'MaxDD':>8}{'Sortino':>8}{'Lev':>6}")
         for r in rows:
-            self.stdout.write(f"{r['name'][:51]:<52}{'si' if r['acceptable'] else 'no':>7}{r['oos_cagr'] * 100:>9.2f}%"
-                              f"{r['cagr'] * 100:>7.2f}%{r['max_dd'] * 100:>7.1f}%{r['bench_dd'] * 100:>7.1f}%"
-                              f"{r['avg_leverage']:>6.2f}")
+            self.stdout.write(f"{r['name'][:51]:<52}{'si' if r['acceptable'] else 'no':>7}{r['score']:>7.2f}"
+                              f"{r['oos_calmar']:>11.2f}{r['oos_cagr'] * 100:>9.2f}%{r['cagr'] * 100:>7.2f}%"
+                              f"{r['max_dd'] * 100:>7.1f}%{r['sortino']:>8.2f}{r['avg_leverage']:>6.2f}")
+        if rows:
+            self.stdout.write(f"Benchmark: CAGR {rows[0]['bench_cagr'] * 100:.2f}%  MaxDD {rows[0]['bench_dd'] * 100:.1f}%")
         w = out["selection"]["winner"]
         self.stdout.write(f"Recomendada: {w.config.name if w else 'ninguna'}")
         for line in out["selection"]["log"]:

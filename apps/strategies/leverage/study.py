@@ -3,11 +3,13 @@ Estudio de apalancamiento (04e §6): mismas señales para todas las configuracio
 que en vivo, costes de margen, ventanas de crisis, criterio de aceptación (§1) y selección con
 control de sobreajuste (§6.4).
 
-Criterio (§1). Una configuración es ACEPTABLE si:
-  1. su caída máxima no supera la del benchmark (comprado y mantenido a 1x) en el mismo periodo;
-  2. en cada ventana de crisis cae menos (o igual) que el benchmark en esa ventana;
-  3. no tiene llamadas de margen.
-Entre las aceptables gana la de mayor CAGR fuera de muestra.
+Criterio del operador (retail: CAGR y caída, la volatilidad es secundaria):
+  - RECHAZO: CAGR menor que el del benchmark base (comprado y mantenido a 1x) en el periodo completo o en
+    cualquiera de las dos mitades, o alguna llamada de margen.
+  - RANKING de las aceptables: puntaje = w × percentil(Calmar fuera de muestra) + (1 − w) × percentil(CAGR
+    fuera de muestra), con w = 0.6 por defecto (el Calmar pesa más). Fuera de muestra = promedio de las dos
+    mitades, cada una valida la selección hecha en la otra.
+  - Caídas por crisis, Sharpe, Sortino, etc. se reportan pero no deciden.
 """
 import copy
 import logging
@@ -124,8 +126,8 @@ def evaluate_window(equity: pd.Series, bench: pd.Series, start, end, crises, mar
     eq, bm = _rebase(equity, start, end), _rebase(bench, start, end)
     s, b = M.summary(eq), M.summary(bm)
     reasons = []
-    if s["max_dd"] < b["max_dd"] - 1e-9:
-        reasons.append(f"caída máx. {s['max_dd']:.1%} peor que el benchmark {b['max_dd']:.1%}")
+    if s["cagr"] < b["cagr"] - 1e-9:
+        reasons.append(f"CAGR {s['cagr']:.1%} menor que el benchmark {b['cagr']:.1%}")
     crisis_rows = []
     for w in crises:
         if w["end"] < pd.Timestamp(start) or w["start"] > pd.Timestamp(end):
@@ -134,10 +136,8 @@ def evaluate_window(equity: pd.Series, bench: pd.Series, start, end, crises, mar
         dd_c, dd_b = M.window_drawdown(eq, a, z), M.window_drawdown(bm, a, z)
         if dd_c is None or dd_b is None:
             continue
-        ok = dd_c >= dd_b - 1e-9
-        crisis_rows.append({"name": w["name"], "dd": dd_c, "bench_dd": dd_b, "ok": ok})
-        if not ok:
-            reasons.append(f"{w['name']}: {dd_c:.1%} vs benchmark {dd_b:.1%}")
+        # informativo: ya no es criterio de rechazo
+        crisis_rows.append({"name": w["name"], "dd": dd_c, "bench_dd": dd_b, "ok": dd_c >= dd_b - 1e-9})
     calls = [c for c in margin_calls if pd.Timestamp(start) <= pd.Timestamp(c) <= pd.Timestamp(end)]
     if calls:
         reasons.append(f"{len(calls)} llamada(s) de margen")
@@ -159,17 +159,58 @@ class ConfigResult:
     def acceptable_both(self) -> bool:
         return self.half_a["acceptable"] and self.half_b["acceptable"] and self.full["acceptable"]
 
+    score: float = 0.0  # puntaje de ranking (Calmar y CAGR), relativo al grupo con el que se compara
+
     @property
-    def oos_score(self) -> float:
+    def oos_cagr(self) -> float:
         """CAGR fuera de muestra: promedio del CAGR de cada mitad, que es la muestra de validación de la otra."""
         return (self.half_a["cagr"] + self.half_b["cagr"]) / 2
+
+    @property
+    def oos_score(self) -> float:  # compatibilidad
+        return self.oos_cagr
+
+    @property
+    def oos_calmar(self) -> float:
+        vals = [h["calmar"] if h["calmar"] is not None else 0.0 for h in (self.half_a, self.half_b)]
+        return sum(vals) / 2
+
+
+def _pct_ranks(values: List[float]) -> List[float]:
+    """Percentil 0..1 (1 = mejor), empates promediados."""
+    n = len(values)
+    if n <= 1:
+        return [1.0] * n
+    order = sorted(range(n), key=lambda i: values[i])
+    ranks = [0.0] * n
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        avg = (i + j) / 2
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg / (n - 1)
+        i = j + 1
+    return ranks
+
+
+def rank_by_score(results: List["ConfigResult"], calmar_weight: float, calmar_of, cagr_of) -> List["ConfigResult"]:
+    """Ordena por puntaje = w·percentil(Calmar) + (1−w)·percentil(CAGR) y lo guarda en `score`."""
+    if not results:
+        return []
+    pc = _pct_ranks([calmar_of(r) for r in results])
+    pg = _pct_ranks([cagr_of(r) for r in results])
+    for r, a, b in zip(results, pc, pg):
+        r.score = calmar_weight * a + (1 - calmar_weight) * b
+    return sorted(results, key=lambda r: (-r.score, -calmar_of(r)))
 
 
 class LeverageStudy:
     def __init__(self, version, start: str = "2007-01-01", end: Optional[str] = None,
                  split: str = "2017-01-01", proxy: Optional[Dict[str, str]] = None,
                  costs: Optional[SimCosts] = None, initial_cash: float = 100000.0, history_start: str = "1985-01-01",
-                 traded_symbol: Optional[str] = None):
+                 traded_symbol: Optional[str] = None, calmar_weight: float = 0.6):
         self.version = version
         self.start, self.split = pd.Timestamp(start), pd.Timestamp(split)
         self.end = pd.Timestamp(end) if end else pd.Timestamp.today().normalize()
@@ -181,6 +222,7 @@ class LeverageStudy:
         self.base = float(params.get("leverage") or 1.0)
         self.max = max(self.base, float(params.get("max_leverage") or self.base))
         self.traded_symbol = traded_symbol
+        self.calmar_weight = calmar_weight
         self.n_runs = 0
         self.proxy_until = None
         if version is not None:
@@ -286,10 +328,15 @@ class LeverageStudy:
         selection = self.select(results)
         return {"results": results, "selection": selection, "n_configs": len(results), "n_runs": self.n_runs}
 
+    def _half_calmar(self, half):
+        return lambda r: (getattr(r, half)["calmar"] or 0.0)
+
     def _best_in_sample(self, results: List[ConfigResult], predicate) -> Optional[ConfigResult]:
+        """Mejor por puntaje (Calmar/CAGR) en la PRIMERA mitad, entre las aceptables en esa mitad."""
         pool = [r for r in results if predicate(r)]
         acc = [r for r in pool if r.half_a["acceptable"]] or pool
-        return max(acc, key=lambda r: r.half_a["cagr"]) if acc else None
+        ranked = rank_by_score(list(acc), self.calmar_weight, self._half_calmar("half_a"), lambda r: r.half_a["cagr"])
+        return ranked[0] if ranked else None
 
     def _resolve_staged(self, cfg: StudyConfig, results: List[ConfigResult]) -> Optional[StudyConfig]:
         spec = cfg.policy["extends_best"]
@@ -310,22 +357,33 @@ class LeverageStudy:
         return StudyConfig(name, cfg.group, pol, cfg.base, cfg.max, n, note=f"parte de {best.config.name} (mejor en 2007–{self.split.year - 1})")
 
     def select(self, results: List[ConfigResult]) -> Dict[str, Any]:
-        acc_a = [r for r in results if r.half_a["acceptable"]]
-        acc_b = [r for r in results if r.half_b["acceptable"]]
-        pick_a = max(acc_a, key=lambda r: r.half_a["cagr"]) if acc_a else None
-        pick_b = max(acc_b, key=lambda r: r.half_b["cagr"]) if acc_b else None
-        candidates = sorted([r for r in results if r.acceptable_both], key=lambda r: -r.oos_score)
+        w = self.calmar_weight
+        acc_a = rank_by_score([r for r in results if r.half_a["acceptable"]], w, self._half_calmar("half_a"),
+                              lambda r: r.half_a["cagr"])
+        acc_b = rank_by_score([r for r in results if r.half_b["acceptable"]], w, self._half_calmar("half_b"),
+                              lambda r: r.half_b["cagr"])
+        pick_a = acc_a[0] if acc_a else None
+        pick_b = acc_b[0] if acc_b else None
+        # puntaje final (fuera de muestra) sobre las aceptables en ambas mitades y en el total
+        candidates = rank_by_score([r for r in results if r.acceptable_both], w, lambda r: r.oos_calmar,
+                                   lambda r: r.oos_cagr)
+        for r in results:
+            if not r.acceptable_both:
+                r.score = 0.0
         log: List[str] = []
         if not candidates:
             return {"winner": None, "pick_a": pick_a, "pick_b": pick_b, "candidates": [], "log":
-                    ["Ninguna configuración es aceptable en ambas mitades y en el periodo completo."]}
-        best_score = candidates[0].oos_score
-        # simplicidad: con menos capas y a menos de 1 punto anual de la mejor, preferir la simple
-        near = [r for r in candidates if best_score - r.oos_score <= 0.01]
-        simple = min(near, key=lambda r: (r.config.n_layers, -r.oos_score))
-        if simple is not candidates[0]:
-            log.append(f"Simplicidad: {simple.config.name} ({simple.config.n_layers} capas) está a "
-                       f"{(best_score - simple.oos_score) * 100:.2f} pts de {candidates[0].config.name} y se prefiere.")
+                    ["Ninguna configuración supera el CAGR del benchmark en ambas mitades sin llamadas de margen."]}
+        best = candidates[0]
+        # simplicidad: con menos capas, a menos de 1 punto de CAGR y con un Calmar al menos 90% del de la mejor
+        near = [r for r in candidates
+                if r is best or (best.oos_cagr - r.oos_cagr <= 0.01
+                                 and r.oos_calmar >= best.oos_calmar - 0.1 * abs(best.oos_calmar))]
+        simple = min(near, key=lambda r: (r.config.n_layers, -r.score))
+        if simple is not best:
+            log.append(f"Simplicidad: {simple.config.name} ({simple.config.n_layers} capas) queda a "
+                       f"{(best.oos_cagr - simple.oos_cagr) * 100:.2f} pts de CAGR y con Calmar "
+                       f"{simple.oos_calmar:.2f} vs {best.oos_calmar:.2f} de {best.config.name}; se prefiere.")
         ordered = [simple] + [r for r in candidates if r is not simple]
         winner, robustness, second = None, None, None
         for cand in ordered[:6]:
@@ -335,7 +393,7 @@ class LeverageStudy:
                 log.append(f"{cand.config.name}: frágil a ±20% ({robustness['reason']}); se pasa a la siguiente.")
                 continue
             if second and any(not m["ok"] for m in second):
-                log.append(f"{cand.config.name}: viola el límite de caída en " +
+                log.append(f"{cand.config.name}: no supera el CAGR del benchmark en " +
                            ", ".join(m["symbol"] for m in second if not m["ok"]) + "; se pasa a la siguiente.")
                 continue
             winner = cand
@@ -413,10 +471,11 @@ class LeverageStudy:
                 ok = res.full["acceptable"]
                 note = ""
                 if not ok and not base_1x.full["acceptable"]:
-                    # La estrategia ya excede el límite a 1x en este mercado: no es un efecto del apalancamiento
-                    ok, note = True, "la estrategia a 1x ya excede el límite en este mercado (no evaluable)"
+                    # La estrategia ya no supera al benchmark a 1x en este mercado: no es un efecto del apalancamiento
+                    ok, note = True, "la estrategia a 1x tampoco supera al benchmark en este mercado (no evaluable)"
                 out.append({"symbol": sym, "cagr": res.full["cagr"], "max_dd": res.full["max_dd"],
-                            "bench_dd": res.full["bench"]["max_dd"], "ok": ok,
+                            "bench_dd": res.full["bench"]["max_dd"], "bench_cagr": res.full["bench"]["cagr"],
+                            "calmar": res.full["calmar"], "ok": ok,
                             "reasons": res.full["reasons"] + ([note] if note else []),
                             "one_x_dd": base_1x.full["max_dd"]})
             except Exception as e:  # sin datos del segundo mercado

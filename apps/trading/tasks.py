@@ -224,7 +224,7 @@ def _compute_daily_regimes(versions, metrics):
         metrics.update({"regimes": labels})
         return build_series_from_bars(provider_keys, bars), labels
     except Exception as e:
-        logger.error(f"Regimenes: calculo fallido, los bots usan PF global: {e}", exc_info=True)
+        logger.error(f"Regimenes: calculo fallido, los bots con regime_pf usan el apalancamiento base: {e}", exc_info=True)
         metrics.update({"regime_error": str(e)})
         return {}, {}
 
