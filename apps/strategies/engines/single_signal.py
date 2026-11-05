@@ -64,6 +64,7 @@ class SingleSignalEngine(BaseEngine):
                 applied_leverage, lev_info = current_trade_leverage(
                     df["Close"].values, long_state.values, base_leverage, max_leverage, use_dynamic_leverage,
                     policy=policy, dates=df.index, regime_labels=labels, return_info=True,
+                    layer_inputs=params.get("_layer_inputs"),
                 )
 
             weight = instruments_weights.get(symbol, Decimal("1.0"))
@@ -87,6 +88,7 @@ class SingleSignalEngine(BaseEngine):
                 "is_long": is_long,
                 "applied_leverage": round(applied_leverage, 4),
                 "leverage": lev_info,
+                "leverage_resized": bool(lev_info.get("leverage_resized")),
                 "exposure": str(exposure),
                 "indicators": last_ind,
             }

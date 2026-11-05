@@ -2,8 +2,9 @@
 Lógica compartida entre el backtest y los motores en vivo para que ambos
 dimensionen las posiciones exactamente igual:
   - conversión de pulsos discretos (1 / -1 / 0) a estado continuo de posición
-  - apalancamiento walk-forward según una política (`leverage_policy`): fijo, o Profit Factor
-    de los trades que entraron en el mismo régimen de mercado que hoy (`regime_pf`)
+  - apalancamiento walk-forward según una política (`leverage_policy`): fijo, PF global acumulado
+    (`global_pf`), PF de los trades que entraron en el mismo régimen de mercado que hoy (`regime_pf`)
+    o capas combinables (`layered`, ver apps/strategies/leverage/)
 """
 import math
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ DEFAULT_SLIPPAGE_PCT = 0.0005
 
 PF_MAX_LEVERAGE_THRESHOLD = 2.5
 PF_MID_LEVERAGE_THRESHOLD = 1.5
+MIN_TRADES_FOR_DYNAMIC_LEVERAGE = 2
 
 
 def pulses_to_long_state(signals: pd.Series) -> pd.Series:
@@ -62,16 +64,37 @@ def leverage_from_pf(
     return base_leverage
 
 
+def dynamic_leverage_from_pnls(
+    closed_pnls: Sequence[float],
+    base_leverage: float,
+    max_leverage: float,
+    use_dynamic_leverage: bool,
+    max_threshold: float = PF_MAX_LEVERAGE_THRESHOLD,
+    mid_threshold: float = PF_MID_LEVERAGE_THRESHOLD,
+    min_trades: int = MIN_TRADES_FOR_DYNAMIC_LEVERAGE,
+) -> float:
+    """PF global (comportamiento histórico): PF de TODOS los trades cerrados, mínimo 2 trades."""
+    active_leverage = base_leverage
+    if use_dynamic_leverage and len(closed_pnls) >= min_trades:
+        active_leverage = leverage_from_pf(profit_factor(closed_pnls), base_leverage, max_leverage,
+                                           max_threshold, mid_threshold)
+    return max(1.0, float(active_leverage))
+
+
 # ---------------------------------------------------------------------------------------------
 # Política de apalancamiento (`StrategyVersion.params["leverage_policy"]`)
 #   fixed     -> siempre el apalancamiento base
+#   global_pf -> PF de todos los trades cerrados (comportamiento histórico); se elige explícitamente
 #   regime_pf -> según el PF de los trades cerrados que entraron en el régimen de mercado de hoy
+#   layered   -> capas combinables (escaladores, topes, políticas de etiqueta), 04e
 # Sin `leverage_policy`: use_regimes=true -> regime_pf; use_regimes=false -> fixed.
 # ---------------------------------------------------------------------------------------------
 
 POLICY_FIXED = "fixed"
+POLICY_GLOBAL_PF = "global_pf"
 POLICY_REGIME_PF = "regime_pf"
-POLICY_TYPES = (POLICY_FIXED, POLICY_REGIME_PF)
+POLICY_LAYERED = "layered"
+POLICY_TYPES = (POLICY_FIXED, POLICY_GLOBAL_PF, POLICY_REGIME_PF, POLICY_LAYERED)
 COMBINE_MODES = ("min", "mean")
 
 DEFAULT_MIN_TRADES = 3
@@ -88,12 +111,21 @@ class LeveragePolicy:
     max_threshold: float = PF_MAX_LEVERAGE_THRESHOLD
     mid_threshold: float = PF_MID_LEVERAGE_THRESHOLD
     provider_params: Mapping[str, Any] = field(default_factory=dict)
+    layered: Optional[Any] = None   # LayeredConfig cuando type == "layered"
 
     @property
     def uses_regimes(self) -> bool:
+        if self.type == POLICY_LAYERED:
+            return bool(self.layered and self.layered.needs_regimes)
         return self.type == POLICY_REGIME_PF
 
+    @property
+    def apply(self) -> str:
+        return self.layered.apply if self.type == POLICY_LAYERED and self.layered else "entry"
+
     def to_dict(self) -> Dict[str, Any]:
+        if self.type == POLICY_LAYERED and self.layered:
+            return self.layered.to_dict()
         d: Dict[str, Any] = {"type": self.type}
         if self.type == POLICY_REGIME_PF:
             d.update({
@@ -115,6 +147,12 @@ def resolve_leverage_policy(params: Optional[Mapping[str, Any]]) -> LeveragePoli
     ptype = str(raw["type"])
     if ptype not in POLICY_TYPES:
         raise ValueError(f"leverage_policy.type invalido: {ptype!r}. Opciones: {', '.join(POLICY_TYPES)}.")
+    if ptype == POLICY_LAYERED:
+        from apps.strategies.leverage.config import parse_layered
+
+        base = float(params.get("leverage") or 1.0)
+        cfg = parse_layered(raw, base, float(params.get("max_leverage") or base))
+        return LeveragePolicy(type=ptype, providers=(cfg.provider,), layered=cfg)
     th = raw.get("thresholds") or {}
     combine = str(raw.get("combine") or "min")
     if combine not in COMBINE_MODES:
@@ -194,6 +232,17 @@ def policy_entry_leverage(
     if policy.type == POLICY_FIXED:
         diag["applied_leverage"] = max(1.0, float(base_leverage))
         return diag["applied_leverage"], diag
+
+    if policy.type == POLICY_GLOBAL_PF:
+        pnls = [t.pnl for t in closed_trades]
+        lev = dynamic_leverage_from_pnls(pnls, base_leverage, max_leverage, True,
+                                         policy.max_threshold, policy.mid_threshold)
+        diag.update({"applied_leverage": lev, "pf_global": profit_factor(pnls) if pnls else None,
+                     "n_trades": len(pnls)})
+        return lev, diag
+
+    if policy.type == POLICY_LAYERED:
+        raise ValueError("La politica 'layered' se evalua en el simulador (apps.strategies.leverage.simulator).")
 
     current_regimes = current_regimes or {}
     suggestions: List[float] = []
@@ -295,6 +344,7 @@ def current_trade_leverage(
     dates: Optional[Sequence[Any]] = None,
     regime_labels: Optional[Mapping[str, Sequence[Any]]] = None,
     return_info: bool = False,
+    layer_inputs: Optional[Any] = None,
 ):
     """
     Reproduce la simulación de BacktestEngine._simulate sobre el histórico y devuelve el
@@ -305,6 +355,13 @@ def current_trade_leverage(
     """
     if policy is None:
         policy = LeveragePolicy(type=POLICY_REGIME_PF if use_dynamic_leverage else POLICY_FIXED)
+    if policy.type == POLICY_LAYERED:
+        from apps.strategies.leverage.simulator import live_layered_leverage
+
+        lev, info = live_layered_leverage(
+            closes, long_state, dates, policy, layer_inputs, regime_labels, slippage_pct=slippage_pct,
+        )
+        return (lev, info) if return_info else lev
     lev, info = simulate_trade_leverages(
         closes, long_state, policy, base_leverage, max_leverage, dates, regime_labels, slippage_pct
     )

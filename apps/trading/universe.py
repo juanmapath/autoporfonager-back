@@ -28,4 +28,7 @@ def pipeline_universe() -> QuerySet:
     # Instrumentos macro (HYG, LQD, DXY, VIX) de los proveedores de régimen que usa algún bot live
     from apps.strategies.regimes.service import regime_instrument_ids
     ids |= regime_instrument_ids()
+    # Referencias de las capas de apalancamiento (VIX3M, canasta de turbulencia, ^IRX...)
+    from apps.strategies.leverage.data import reference_instrument_ids
+    ids |= reference_instrument_ids()
     return Instrument.objects.filter(id__in=ids).order_by("id")

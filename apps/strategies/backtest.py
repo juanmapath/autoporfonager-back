@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from apps.strategies.signals.catalog import STRATEGY_MAP
 from apps.strategies.signals.sizing import (
-    ClosedTrade, LeveragePolicy, POLICY_FIXED, POLICY_REGIME_PF, aligned_label, policy_entry_leverage,
+    ClosedTrade, LeveragePolicy, POLICY_FIXED, POLICY_LAYERED, POLICY_REGIME_PF, aligned_label, policy_entry_leverage,
     resolve_leverage_policy,
 )
 
@@ -88,6 +88,7 @@ class BacktestEngine:
         leverage_policy: Optional[Dict[str, Any]] = None,
         regime_series: Optional[Dict[str, pd.Series]] = None,
         version=None,
+        layer_inputs=None,
     ) -> Dict[str, Any]:
         """
         Ejecuta el backtest histórico completo de un Bot (Strategy) de la base de datos.
@@ -134,6 +135,7 @@ class BacktestEngine:
             use_dynamic_leverage=strat_dyn,
             leverage_policy=leverage_policy,
             regime_series=regime_series,
+            layer_inputs=layer_inputs,
             strategy_params=params,
             periodic_deposit=strat_deposit,
             deposit_frequency=strat_freq,
@@ -155,6 +157,7 @@ class BacktestEngine:
         deposit_frequency: str = "monthly",
         leverage_policy: Optional[Dict[str, Any]] = None,
         regime_series: Optional[Dict[str, pd.Series]] = None,
+        layer_inputs=None,
     ) -> Dict[str, Any]:
         """
         Ejecuta el backtest a partir de una configuración ad-hoc o personalizada.
@@ -381,7 +384,9 @@ class BacktestEngine:
 
         # 3. Politica de apalancamiento (la misma funcion que usan los motores en vivo) y series de regimen
         if leverage_policy:
-            policy = resolve_leverage_policy({"leverage_policy": leverage_policy})
+            policy = resolve_leverage_policy(
+                {"leverage": leverage, "max_leverage": max_leverage, "leverage_policy": leverage_policy}
+            )
         else:
             policy = LeveragePolicy(type=POLICY_REGIME_PF if use_dynamic_leverage else POLICY_FIXED)
         regime_labels = None
@@ -391,6 +396,21 @@ class BacktestEngine:
             if regime_series is None:
                 regime_series = fetch_series_backtest(policy, start_date, end_date)
             regime_labels = {p: align_labels(regime_series.get(p), df_traded_eval.index) for p in policy.providers}
+
+        # 4a. Politica layered: simulador de capas (mismo que en vivo), con interes y llamada de margen
+        if policy.type == POLICY_LAYERED:
+            from apps.strategies.leverage.backtest_result import run_layered_backtest
+            from apps.strategies.leverage.data import backtest_inputs
+            from apps.strategies.leverage.layers import LayerInputs
+
+            if layer_inputs is None:
+                ref_start = (pd.to_datetime(start_date) - pd.Timedelta(days=550)).strftime("%Y-%m-%d")
+                layer_inputs = backtest_inputs(policy, ref_start, end_date)
+            closes = {**layer_inputs.closes, "self": df_traded["Close"].astype(float)}
+            return run_layered_backtest(
+                self, df_traded_eval, signals_eval, traded_sym, policy, LayerInputs(closes=closes),
+                regime_labels, entry_meta_by_date, exit_meta_by_date,
+            )
 
         # 4. Simulación de Ejecución con Apalancamiento Dinámico y Atribución
         return self._simulate(

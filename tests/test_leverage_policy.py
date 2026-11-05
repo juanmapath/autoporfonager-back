@@ -28,6 +28,29 @@ def make_series(seed, n=1500):
     return df, pd.Series(sig, index=idx)
 
 
+# ---------- Regresion: global_pf reproduce el apalancamiento historico (live y backtest) ----------
+
+import json
+from pathlib import Path
+
+GOLDEN = json.loads((Path(__file__).parent / "fixtures" / "leverage_global_pf_golden.json").read_text())
+
+
+@pytest.mark.parametrize("seed", [3, 4, 5])
+def test_global_pf_reproduces_historical_leverage_in_backtest_and_live(seed):
+    """Golden capturado con el codigo anterior a F4 (PF de todos los trades, minimo 2)."""
+    gold = GOLDEN[str(seed)]
+    df, sig = make_series(seed)
+    state = pulses_to_long_state(sig)
+    policy = resolve_leverage_policy({"leverage_policy": {"type": "global_pf"}})
+    result = BacktestEngine()._simulate(df, sig, "X", 1.0, 2.0, leverage_policy=policy)
+    assert [t["leverage"] for t in result["trades"]] == gold["trade_leverages"]
+    assert result["final_value"] == gold["final"]
+    live = [current_trade_leverage(df["Close"].values[:k], state.values[:k], 1.0, 2.0, policy=policy, dates=df.index[:k])
+            for k in range(60, len(df), 97)]
+    assert live == gold["live"]
+
+
 # ---------- Resolucion de la politica ----------
 
 def test_policy_resolution():
@@ -37,7 +60,9 @@ def test_policy_resolution():
     assert resolve_leverage_policy({"use_regimes": True}).type == POLICY_REGIME_PF
     p = resolve_leverage_policy({"leverage_policy": {"type": "regime_pf"}})
     assert p.providers == ("macro",) and p.min_trades == 3 and p.lookback_years == 15 and p.combine == "min"
-    for bad in ({"type": "global_pf"}, {"type": "nope"}, {"type": "regime_pf", "combine": "max"}):
+    # global_pf sigue disponible como opcion explicita (comportamiento historico)
+    assert resolve_leverage_policy({"leverage_policy": {"type": "global_pf"}}).type == "global_pf"
+    for bad in ({"type": "nope"}, {"type": "regime_pf", "combine": "max"}):
         with pytest.raises(ValueError):
             resolve_leverage_policy({"leverage_policy": bad})
 
@@ -319,7 +344,10 @@ def test_leverage_policy_serializer_validation():
     ok = validate_leverage_policy({"type": "regime_pf", "providers": ["macro"], "min_trades": 5})
     assert ok["type"] == "regime_pf"
     assert validate_leverage_policy(None) is None
-    for bad in ({"type": "global_pf"}, {"type": "regime_pf", "providers": ["hmm"]}, {"type": "regime_pf", "combine": "max"}):
+    assert validate_leverage_policy({"type": "global_pf"})["type"] == "global_pf"
+    for bad in ({"type": "regime_pf", "providers": ["hmm"]}, {"type": "regime_pf", "combine": "max"},
+                {"type": "layered", "caps": [{"key": "vol_target"}]}, {"type": "layered", "scalers": ["nope"]},
+                {"type": "layered", "min": 2.0, "max": 1.5}):
         with pytest.raises(serializers.ValidationError):
             validate_leverage_policy(bad)
 
