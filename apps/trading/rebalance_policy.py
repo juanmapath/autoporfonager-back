@@ -129,6 +129,7 @@ def decide_position_trade(
     force_rebalance: bool = False,
     config: Optional[RebalanceConfig] = None,
     portfolio_reset: bool = False,
+    leverage_change: bool = False,
 ) -> Tuple[bool, str]:
     """
     Decides whether a sleeve position must be traded to its target on this run.
@@ -155,6 +156,10 @@ def decide_position_trade(
         return True, "allocation_change"
     if portfolio_reset:
         return True, "portfolio_reset"
+    if leverage_change:
+        # La politica layered (apply=daily) cambio el apalancamiento objetivo >= min_change hoy:
+        # se redimensiona aunque no sea fecha de rebalanceo del bot.
+        return True, "leverage_change"
 
     if not is_rebalance_date:
         return False, "hold_until_rebalance_date"

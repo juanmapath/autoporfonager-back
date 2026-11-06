@@ -124,6 +124,7 @@ class PortfolioAllocator:
                 inst = si.instrument
                 sig = Signal.objects.filter(version=version, instrument=inst).order_by("-as_of").first()
                 exposure = sig.target_exposure if sig else Decimal("0.0")
+                leverage_change = bool(sig and sig.changed and (sig.diagnostics or {}).get("leverage_resized"))
 
                 # Fetch latest price
                 lq = LatestQuote.objects.filter(instrument=inst).first()
@@ -183,6 +184,7 @@ class PortfolioAllocator:
                         force_rebalance=force_rebalance,
                         config=bot_config,
                         portfolio_reset=sleeve_was_reset,
+                        leverage_change=leverage_change,
                     )
                 delta = (target_shares - curr_shares) if should_trade else Decimal("0.0")
 

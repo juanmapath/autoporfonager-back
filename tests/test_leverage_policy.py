@@ -319,7 +319,9 @@ def test_leverage_policy_serializer_validation():
     ok = validate_leverage_policy({"type": "regime_pf", "providers": ["macro"], "min_trades": 5})
     assert ok["type"] == "regime_pf"
     assert validate_leverage_policy(None) is None
-    for bad in ({"type": "global_pf"}, {"type": "regime_pf", "providers": ["hmm"]}, {"type": "regime_pf", "combine": "max"}):
+    for bad in ({"type": "global_pf"}, {"type": "regime_pf", "providers": ["hmm"]}, {"type": "regime_pf", "combine": "max"},
+                {"type": "layered", "caps": [{"key": "vol_target"}]}, {"type": "layered", "scalers": ["nope"]},
+                {"type": "layered", "min": 2.0, "max": 1.5}):
         with pytest.raises(serializers.ValidationError):
             validate_leverage_policy(bad)
 

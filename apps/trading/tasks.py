@@ -224,9 +224,32 @@ def _compute_daily_regimes(versions, metrics):
         metrics.update({"regimes": labels})
         return build_series_from_bars(provider_keys, bars), labels
     except Exception as e:
-        logger.error(f"Regimenes: calculo fallido, los bots usan PF global: {e}", exc_info=True)
+        logger.error(f"Regimenes: calculo fallido, los bots con regime_pf usan el apalancamiento base: {e}", exc_info=True)
         metrics.update({"regime_error": str(e)})
         return {}, {}
+
+
+def _load_layer_inputs(versions, metrics):
+    """Cierres de los instrumentos de referencia de las capas (VIX, HYG, ^IRX...) que usan los bots layered."""
+    from apps.strategies.leverage.data import (
+        ensure_reference_instruments, inputs_from_frames, reference_symbols_for_versions,
+    )
+
+    symbols = reference_symbols_for_versions(versions)
+    if not symbols:
+        return None
+    try:
+        instruments = ensure_reference_instruments(symbols)
+        missing = [i.symbol for i in instruments if not i.full_history_synced]
+        if missing:
+            logger.warning(f"Capas: referencias sin historial completo (las capas que las usan se apagan): {missing}")
+            metrics.update({"layer_missing_history": missing})
+        frames = load_daily_bars_frames([i.id for i in instruments if i.full_history_synced])
+        return inputs_from_frames({i.symbol: frames[i.id] for i in instruments if i.id in frames})
+    except Exception as e:
+        logger.error(f"Capas: no se pudieron cargar las referencias: {e}", exc_info=True)
+        metrics.update({"layer_error": str(e)})
+        return None
 
 
 def _compute_regimes_and_signals():
@@ -259,6 +282,7 @@ def _compute_regimes_and_signals():
         # Regimenes de mercado (proveedores usados por bots con leverage_policy regime_pf): se calculan y
         # guardan ANTES de las señales; el mismo calculo causal alimenta el apalancamiento de cada bot.
         regime_series, regime_labels = _compute_daily_regimes(versions, metrics)
+        layer_inputs = _load_layer_inputs(versions, metrics)
 
         for v in versions:
             version_started = time.monotonic()
@@ -293,8 +317,15 @@ def _compute_regimes_and_signals():
                 if source_si:
                     engine_params["source_symbol"] = source_si.instrument.symbol
 
-            if regime_series and resolve_leverage_policy(engine_params).uses_regimes:
+            try:
+                version_policy = resolve_leverage_policy(engine_params)
+            except ValueError as e:
+                logger.error(f"leverage_policy invalida en {strat.slug} v{v.version}: {e}")
+                version_policy = None
+            if version_policy and regime_series and version_policy.uses_regimes:
                 engine_params["_regime_series"] = regime_series
+            if version_policy and version_policy.type == "layered" and layer_inputs is not None:
+                engine_params["_layer_inputs"] = layer_inputs
 
             # El ranking de los bots ranked_allocation solo se recalcula en fecha de rebalanceo del
             # portafolio; entre fechas se reutiliza el orden del último snapshot.

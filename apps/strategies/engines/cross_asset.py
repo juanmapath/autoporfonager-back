@@ -61,6 +61,7 @@ class CrossAssetEngine(BaseEngine):
                 applied_leverage, lev_infos[sym] = current_trade_leverage(
                     traded_df["Close"].values, traded_state.values, base_leverage, max_leverage, use_dynamic_leverage,
                     policy=policy, dates=traded_df.index, regime_labels=labels, return_info=True,
+                    layer_inputs=params.get("_layer_inputs"),
                 )
             leverages[sym] = round(applied_leverage, 4)
             targets[sym] = weight * Decimal(str(round(applied_leverage, 4))) if is_long else Decimal("0.0")
@@ -71,6 +72,10 @@ class CrossAssetEngine(BaseEngine):
             "is_long": is_long,
             "applied_leverage": leverages,
             "leverage": lev_infos,
+            # por activo (Signal.diagnostics de cada instrumento): apalancamiento y redimensionado
+            **{sym: {"applied_leverage": leverages.get(sym), "leverage": lev_infos.get(sym, {}),
+                     "leverage_resized": bool((lev_infos.get(sym) or {}).get("leverage_resized"))}
+               for sym in instruments_weights},
             "targets": {k: str(v) for k, v in targets.items()},
         }
         return targets, diagnostics

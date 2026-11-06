@@ -1,0 +1,32 @@
+# Grilla inicial de 04e §6.5, decidida antes de ver resultados.
+# base / max salen de la version (leverage / max_leverage) salvo que la configuracion los fije.
+# `extends_best: <grupo>` parte de la mejor configuracion de ese grupo elegida SOLO en la primera mitad.
+# Las configuraciones de SOLO topes usan base = max: un tope solo puede bajar el apalancamiento, asi que con
+# base 1x no cambiarian nada (serian 1x fijo). Con escaladores o etiquetas la base es la de la version.
+- {name: "1x fijo", group: referencia, base: 1.0, max: 1.0, policy: {type: fixed}}
+- {name: "max fijo", group: referencia, base: max, policy: {type: fixed}}
+- {name: "regime_pf macro (actual)", group: referencia, policy: {type: regime_pf}}
+
+- {name: "vol_target 0.18", group: vol_target, policy: {type: layered, scalers: [{key: vol_target, params: {target_vol: 0.18}}]}}
+- {name: "vol_target 0.22", group: vol_target, policy: {type: layered, scalers: [{key: vol_target, params: {target_vol: 0.22}}]}}
+- {name: "vol_target 0.26", group: vol_target, policy: {type: layered, scalers: [{key: vol_target, params: {target_vol: 0.26}}]}}
+- {name: "vol_target 0.30", group: vol_target, policy: {type: layered, scalers: [{key: vol_target, params: {target_vol: 0.30}}]}}
+- {name: "trend_gate 150", base: max, group: trend_gate, policy: {type: layered, caps: [{key: trend_gate, params: {sma: 150}}]}}
+- {name: "trend_gate 200", base: max, group: trend_gate, policy: {type: layered, caps: [{key: trend_gate, params: {sma: 200}}]}}
+- {name: "trend_gate 250", base: max, group: trend_gate, policy: {type: layered, caps: [{key: trend_gate, params: {sma: 250}}]}}
+- {name: "vix_term", base: max, group: una_capa, policy: {type: layered, caps: [{key: vix_term}]}}
+- {name: "vix_relative", base: max, group: una_capa, policy: {type: layered, caps: [{key: vix_relative}]}}
+- {name: "credit_stress", base: max, group: una_capa, policy: {type: layered, caps: [{key: credit_stress}]}}
+- {name: "drawdown_brake 0.20", base: max, group: drawdown_brake, policy: {type: layered, caps: [{key: drawdown_brake, params: {dd_limit: 0.20}}]}}
+- {name: "drawdown_brake 0.30", base: max, group: drawdown_brake, policy: {type: layered, caps: [{key: drawdown_brake, params: {dd_limit: 0.30}}]}}
+
+- {name: "{best} + trend_gate 200", group: dos_capas, policy: {extends_best: vol_target, add_caps: [{key: trend_gate, params: {sma: 200}}]}}
+- {name: "{best} + vix_term", group: dos_capas, policy: {extends_best: vol_target, add_caps: [{key: vix_term}]}}
+- {name: "{best} + drawdown_brake 0.30", group: dos_capas, policy: {extends_best: vol_target, add_caps: [{key: drawdown_brake, params: {dd_limit: 0.30}}]}}
+- {name: "{best} + trend_gate 200 + vix_term", group: tres_capas, policy: {extends_best: vol_target, add_caps: [{key: trend_gate, params: {sma: 200}}, {key: vix_term}]}}
+- {name: "{best} + trend_gate 200 + drawdown_brake 0.30", group: tres_capas, policy: {extends_best: vol_target, add_caps: [{key: trend_gate, params: {sma: 200}}, {key: drawdown_brake, params: {dd_limit: 0.30}}]}}
+
+- {name: "macro_pf + trend_gate 200", group: etiqueta, policy: {type: layered, label_policies: [{key: macro_pf}], caps: [{key: trend_gate, params: {sma: 200}}]}}
+- {name: "kelly_regime + {best}", group: etiqueta, policy: {extends_best: vol_target, add_label_policies: [{key: kelly_regime}]}}
+
+- {name: "{best} con min 0.5", group: l_min, policy: {extends_best: multi, min: 0.5}}

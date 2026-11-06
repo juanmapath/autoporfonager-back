@@ -79,6 +79,7 @@ class MultiSignalEngine(BaseEngine):
                 applied_leverage, lev_info = current_trade_leverage(
                     df["Close"].values, combined_long.values, base_leverage, max_leverage, use_dynamic_leverage,
                     policy=policy, dates=df.index, regime_labels=labels, return_info=True,
+                    layer_inputs=params.get("_layer_inputs"),
                 )
             exposure = weight * Decimal(str(round(applied_leverage, 4))) if is_long else Decimal("0.0")
             targets[symbol] = exposure
@@ -89,6 +90,7 @@ class MultiSignalEngine(BaseEngine):
                 "is_long": bool(is_long),
                 "applied_leverage": round(applied_leverage, 4),
                 "leverage": lev_info,
+                "leverage_resized": bool(lev_info.get("leverage_resized")),
                 "exposure": str(exposure),
             }
 
